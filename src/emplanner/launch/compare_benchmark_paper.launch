@@ -1,0 +1,67 @@
+<launch>
+  <arg name="scenario_name" default="curve_turn30_feasible" />
+  <arg name="use_rl_dp" default="false" />
+  <arg name="plan_iterations" default="1" />
+  <arg name="advance_vehicle" default="false" />
+  <arg name="plan_step" default="0.2" />
+  <arg name="car_speed" default="0.0" />
+  <arg name="car_stop_flag" default="0.0" />
+  <arg name="sample_s" default="0.8" />
+  <arg name="col_node_num" default="10" />
+  <arg name="row_node_num" default="19" />
+  <arg name="straight_turn_x" default="4.0" />
+  <arg name="straight_turn_angle_deg" default="30.0" />
+  <arg name="straight_turn_arc_length" default="2.0" />
+  <arg name="turn_angle_case" default="30" />
+  <arg name="turn_shape_case" default="single_arc" />
+  <arg name="second_turn_gap" default="0.8" />
+  <arg name="second_turn_angle_deg" default="0.0" />
+  <arg name="second_turn_arc_length" default="0.0" />
+  <arg name="w_qp_l" default="800" />
+  <arg name="w_qp_dl" default="2000" />
+  <arg name="w_qp_ddl" default="10000" />
+  <arg name="w_qp_ref_dp" default="50" />
+  <arg name="obstacle_centers_x" default="0.80,1.90,2.75,5.20,6.40,7.20,5.0" />
+  <arg name="obstacle_centers_y" default="-1.85,1.90,-0.25,-1.70,2.60,0.30,1.2"/>
+  <arg name="obstacle_lengths" default="1.23,1.00,0.80,0.75,0.90,0.70,1.1" />
+  <arg name="obstacle_widths" default="1.00,2.00,0.70,0.60,0.80,0.65,0.9" />
+  <arg name="obstacle_yaws" default="0.20,0.20,0.11,0.05,0.16,-0.09,0.21" />
+  <arg name="obstacle_x_vels" default="" />
+  <arg name="obstacle_y_vels" default="" />
+  <arg name="obstacle_csv" default="" />
+  <arg name="obstacle_source_scenario" default="" />
+
+  <include file="$(find emplanner)/launch/compare_benchmark.launch">
+    <arg name="scenario_name" value="$(arg scenario_name)" />
+    <arg name="use_rl_dp" value="$(arg use_rl_dp)" />
+    <arg name="plan_iterations" value="$(arg plan_iterations)" />
+    <arg name="advance_vehicle" value="$(arg advance_vehicle)" />
+    <arg name="plan_step" value="$(arg plan_step)" />
+    <arg name="car_speed" value="$(arg car_speed)" />
+    <arg name="car_stop_flag" value="$(arg car_stop_flag)" />
+    <arg name="sample_s" value="$(arg sample_s)" />
+    <arg name="col_node_num" value="$(arg col_node_num)" />
+    <arg name="row_node_num" value="$(arg row_node_num)" />
+    <arg name="straight_turn_x" value="$(arg straight_turn_x)" />
+    <arg name="straight_turn_angle_deg" value="$(arg straight_turn_angle_deg)" />
+    <arg name="straight_turn_arc_length" value="$(arg straight_turn_arc_length)" />
+    <arg name="turn_angle_case" value="$(arg turn_angle_case)" />
+    <arg name="turn_shape_case" value="$(arg turn_shape_case)" />
+    <arg name="second_turn_gap" value="$(arg second_turn_gap)" />
+    <arg name="second_turn_angle_deg" value="$(arg second_turn_angle_deg)" />
+    <arg name="second_turn_arc_length" value="$(arg second_turn_arc_length)" />
+    <arg name="w_qp_l" value="$(arg w_qp_l)" />
+    <arg name="w_qp_dl" value="$(arg w_qp_dl)" />
+    <arg name="w_qp_ddl" value="$(arg w_qp_ddl)" />
+    <arg name="w_qp_ref_dp" value="$(arg w_qp_ref_dp)" />
+    <arg name="obstacle_centers_x" value="$(arg obstacle_centers_x)" />
+    <arg name="obstacle_centers_y" value="$(arg obstacle_centers_y)" />
+    <arg name="obstacle_lengths" value="$(arg obstacle_lengths)" />
+    <arg name="obstacle_widths" value="$(arg obstacle_widths)" />
+    <arg name="obstacle_yaws" value="$(arg obstacle_yaws)" />
+    <arg name="obstacle_x_vels" value="$(arg obstacle_x_vels)" />
+    <arg name="obstacle_y_vels" value="$(arg obstacle_y_vels)" />
+    <arg name="obstacle_csv" value="$(arg obstacle_csv)" />
+    <arg name="obstacle_source_scenario" value="$(arg obstacle_source_scenario)" />
+  </include>
+</launch>

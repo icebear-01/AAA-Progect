@@ -1,0 +1,11 @@
+scenario_name: scan_b
+dp_source: RL_DP
+qp_running_normally: true
+dp_points: 89
+qp_points: 251
+dp_path_length: 9.887295
+qp_path_length: 5.750030
+dp_mean_abs_kappa: 2.306191
+qp_mean_abs_kappa: 7.746030
+dp_max_abs_kappa: 15.337631
+qp_max_abs_kappa: 119.990747

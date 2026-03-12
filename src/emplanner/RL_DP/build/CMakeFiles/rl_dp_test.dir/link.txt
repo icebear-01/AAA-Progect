@@ -1,0 +1,1 @@
+/usr/bin/c++     CMakeFiles/rl_dp_test.dir/rl_dp_test.cpp.o  -o rl_dp_test   -L/usr/local/onnxruntime/lib  -Wl,-rpath,/usr/local/onnxruntime/lib -lonnxruntime librl_dp.a /usr/local/onnxruntime/lib/libonnxruntime.so libdp_planner.a /usr/local/onnxruntime/lib/libonnxruntime.so libdp_policy.a -lonnxruntime /usr/lib/x86_64-linux-gnu/libpython3.8.so 

@@ -1,0 +1,17 @@
+scenario_name: straight_case_multi_obs_paper
+dp_source: classic
+qp_running_normally: true
+sample_s: 0.800000
+col_node_num: 10
+planning_s_horizon: 8.000000
+rl_dp_s_samples: 9
+rl_dp_s_max: 8.000000
+obstacle_count: 3
+dp_points: 160
+qp_points: 160
+dp_path_length: 7.950000
+qp_path_length: 7.950000
+dp_mean_abs_kappa: 0.728587
+qp_mean_abs_kappa: 0.229705
+dp_max_abs_kappa: 4.033767
+qp_max_abs_kappa: 0.940556

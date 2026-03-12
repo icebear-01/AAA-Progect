@@ -1,0 +1,25 @@
+{
+  "dataset": "/home/wmd/elevator_car/P2P_fast_env_origin/src/planning/src/hybrid_aStar/model_base_astar/neural-astar/planning-datasets/data/street/mixed_064_moore_c16.npz",
+  "split": "train",
+  "map_index": 3186,
+  "seed": 2103,
+  "start_xy": [
+    6,
+    33
+  ],
+  "goal_xy": [
+    55,
+    8
+  ],
+  "lambda_guidance": 1.0,
+  "heuristic_mode": "octile",
+  "heuristic_weight": 1.0,
+  "guidance_integration_mode": "g_cost",
+  "guidance_bonus_threshold": 0.5,
+  "resolution": 0.25,
+  "origin_x": 0.0,
+  "origin_y": 0.0,
+  "raw_path_points": 51,
+  "seed_path_points": 103,
+  "smoothed_path_points": 103
+}

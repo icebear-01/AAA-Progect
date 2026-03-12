@@ -1,0 +1,23 @@
+{
+  "configurations": [
+    {
+      "browse": {
+        "databaseFilename": "${default}",
+        "limitSymbolsToIncludedHeaders": false
+      },
+      "includePath": [
+        "/opt/ros/noetic/include/**",
+        "/home/wmd/code_car/src/BasicControlBus_ws1/src/basic_control/include/**",
+        "/home/wmd/code_car/src/NDT_workspace1/NDT_workspace/src/ugv_position/include/**",
+        "/usr/include/**",
+        "/home/wmd/code_car/src/Record_Path/include/**"
+      ],
+      "name": "ROS",
+      "intelliSenseMode": "gcc-x64",
+      "compilerPath": "/usr/bin/gcc",
+      "cStandard": "gnu11",
+      "cppStandard": "c++14"
+    }
+  ],
+  "version": 4
+}

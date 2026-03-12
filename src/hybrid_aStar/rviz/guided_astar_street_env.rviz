@@ -1,0 +1,198 @@
+Panels:
+  - Class: rviz/Displays
+    Help Height: 120
+    Name: Displays
+    Property Tree Widget:
+      Expanded:
+        - /Global Options1
+        - /StreetMap1
+        - /StreetMapMarkers1
+        - /Start Pose1
+        - /Goal Pose1
+        - /Planned Path1
+      Splitter Ratio: 0.5
+    Tree Height: 780
+  - Class: rviz/Tool Properties
+    Expanded:
+      - /2D Pose Estimate1
+      - /2D Nav Goal1
+    Name: Tool Properties
+    Splitter Ratio: 0.5886790156364441
+  - Class: rviz/Views
+    Expanded:
+      - /Current View1
+    Name: Views
+    Splitter Ratio: 0.5
+  - Class: rviz/Time
+    Name: Time
+    SyncMode: 0
+    SyncSource: ""
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Alpha: 0.35
+      Cell Size: 1
+      Class: rviz/Grid
+      Color: 160; 160; 160
+      Enabled: true
+      Line Style:
+        Line Width: 0.03
+        Value: Lines
+      Name: Grid
+      Normal Cell Count: 0
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Plane: XY
+      Plane Cell Count: 40
+      Reference Frame: <Fixed Frame>
+      Value: true
+    - Alpha: 0.8
+      Class: rviz/Map
+      Color Scheme: map
+      Draw Behind: false
+      Enabled: true
+      Name: StreetMap
+      Topic: /guided_frontend_street_map
+      Unreliable: false
+      Use Timestamp: false
+      Value: true
+    - Class: rviz/MarkerArray
+      Enabled: true
+      Marker Topic: /guided_frontend_street_map/markers
+      Name: StreetMapMarkers
+      Namespaces:
+        frontend_street_map: true
+      Queue Size: 100
+      Value: true
+    - Alpha: 0.9
+      Axes Length: 1
+      Axes Radius: 0.08
+      Class: rviz/PoseWithCovariance
+      Color: 0; 255; 0
+      Covariance:
+        Orientation:
+          Alpha: 0.5
+          Color: 255; 255; 127
+          Color Style: Unique
+          Frame: Local
+          Offset: 1
+          Scale: 1
+          Value: false
+        Position:
+          Alpha: 0.3
+          Color: 204; 51; 204
+          Scale: 1
+          Value: false
+        Value: false
+      Enabled: true
+      Head Length: 0.4
+      Head Radius: 0.12
+      Name: Start Pose
+      Queue Size: 10
+      Shaft Length: 1.0
+      Shaft Radius: 0.05
+      Shape: Arrow
+      Topic: /initialpose
+      Unreliable: false
+      Value: true
+    - Alpha: 0.9
+      Axes Length: 1
+      Axes Radius: 0.08
+      Class: rviz/Pose
+      Color: 0; 0; 0
+      Enabled: true
+      Head Length: 0.4
+      Head Radius: 0.12
+      Name: Goal Pose
+      Queue Size: 10
+      Shaft Length: 1.0
+      Shaft Radius: 0.05
+      Shape: Arrow
+      Topic: /move_base_simple/goal
+      Unreliable: true
+      Value: true
+    - Alpha: 1
+      Buffer Length: 1
+      Class: rviz/Path
+      Color: 255; 100; 0
+      Enabled: true
+      Head Diameter: 0.25
+      Head Length: 0.2
+      Length: 0.25
+      Line Style: Billboards
+      Line Width: 0.08
+      Name: Planned Path
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Pose Color: 255; 85; 255
+      Pose Style: None
+      Queue Size: 10
+      Radius: 0.04
+      Shaft Diameter: 0.06
+      Shaft Length: 0.1
+      Topic: /run_guided_astar/searched_path
+      Unreliable: false
+      Value: true
+    - Class: rviz/MarkerArray
+      Enabled: true
+      Marker Topic: /run_guided_astar/vehicle_path
+      Name: VehiclePath
+      Namespaces:
+        "": true
+      Queue Size: 100
+      Value: true
+  Enabled: true
+  Global Options:
+    Background Color: 25; 25; 25
+    Default Light: true
+    Fixed Frame: velodyne
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz/Interact
+      Hide Inactive Objects: true
+    - Class: rviz/MoveCamera
+    - Class: rviz/Select
+    - Class: rviz/FocusCamera
+    - Class: rviz/Measure
+    - Class: rviz/SetInitialPose
+      Topic: /initialpose
+    - Class: rviz/SetGoal
+      Topic: /move_base_simple/goal
+  Value: true
+  Views:
+    Current:
+      Angle: 0
+      Class: rviz/TopDownOrtho
+      Enable Stereo Rendering:
+        Stereo Eye Separation: 0.06
+        Stereo Focal Distance: 1
+        Swap Stereo Eyes: false
+        Value: false
+      Name: TopDown
+      Near Clip Distance: 0.01
+      Scale: 35
+      Target Frame: velodyne
+      Value: TopDownOrtho (rviz)
+      X: 0
+      Y: 0
+      Z: 0
+    Saved: ~
+Window Geometry:
+  Displays:
+    collapsed: false
+  Height: 1000
+  Hide Left Dock: false
+  Hide Right Dock: false
+  QMainWindow State: 000000ff00000000fd00000004000000000000019000000372fc0200000004fb000000100044006900730070006c006100790073010000003c00000372000000bb01000005fb0000001e0054006f006f006c002000500072006f007000650072007400690065007301000003b400000193000000bb01000005fb0000000a0056006900650077007300000000410000037b000000a901000005fb0000000a00540069006d00650100000000000003720000000000000000000003740000037200000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730000000000ffffffff0000000000000000
+  Time:
+    collapsed: false
+  Views:
+    collapsed: false
+  Width: 1800
+  X: 60
+  Y: 24

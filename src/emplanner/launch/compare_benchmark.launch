@@ -1,0 +1,136 @@
+<launch>
+  <arg name="scenario_name" default="straight_case_multi_obs_smoothqp_paper" />
+  <arg name="floor" default="1" />
+  <arg name="task_type" default="0" />
+  <arg name="is_indoor" default="true" />
+  <arg name="plan_iterations" default="0" />
+  <arg name="advance_vehicle" default="false" />
+  <arg name="plan_step" default="0.2" />
+  <arg name="car_speed" default="0.0" />
+  <arg name="car_stop_flag" default="0.0" />
+  <arg name="plan_time" default="4.0" />
+  <arg name="speed_plan_t_dt" default="0.5" />
+  <arg name="st_s_min_step" default="0.2" />
+  <arg name="speed_plan_distance" default="5.0" />
+  <arg name="st_lateral_limit" default="1.0" />
+  <arg name="dynamic_vel_threshold" default="0.0" />
+  <arg name="speed_reference" default="0.5" />
+  <arg name="speed_dp_ref_vel_weight" default="500.0" />
+  <arg name="speed_dp_hard_distance" default="0.4" />
+  <arg name="dp_vel_max" default="1.2" />
+  <arg name="dp_a_max" default="0.6" />
+  <arg name="speed_dp_soft_distance" default="0.6" />
+  <arg name="speed_qp_ref_s_weight" default="0.0" />
+  <arg name="speed_qp_safe_distance" default="0.01" />
+  <arg name="speed_qp_v_max" default="1.2" />
+  <arg name="speed_qp_a_max" default="0.5" />
+
+  <arg name="use_straight_trajectory" default="true" />
+  <arg name="straight_start_x" default="0.0" />
+  <arg name="straight_start_y" default="0.0" />
+  <arg name="straight_length" default="10.0" />
+  <arg name="straight_step" default="0.1" />
+  <arg name="straight_turn_x" default="1000000.0" />
+  <arg name="straight_turn_angle_deg" default="0.0" />
+  <arg name="straight_turn_arc_length" default="0.0" />
+  <arg name="turn_angle_case" default="" />
+  <arg name="turn_shape_case" default="single_arc" />
+  <arg name="second_turn_gap" default="0.8" />
+  <arg name="second_turn_angle_deg" default="0.0" />
+  <arg name="second_turn_arc_length" default="0.0" />
+
+  <arg name="use_rl_dp" default="false" />
+  <arg name="sample_s" default="0.8" />
+  <arg name="sample_l" default="0.35" />
+  <arg name="sample_s_num" default="10" />
+  <arg name="sample_s_per_meters" default="20" />
+  <arg name="col_node_num" default="10" />
+  <arg name="row_node_num" default="19" />
+  <arg name="rl_dp_s_samples" default="9" />
+  <arg name="rl_dp_s_max" default="8.0" />
+
+  <arg name="w_qp_l" default="800" />
+  <arg name="w_qp_dl" default="1200" />
+  <arg name="w_qp_ddl" default="5000" />
+  <arg name="w_qp_ref_dp" default="50" />
+
+  <arg name="obstacle_centers_x" default="3.0,4.8,6.3" />
+  <arg name="obstacle_centers_y" default="0.0,2.0,-0.55" />
+  <arg name="obstacle_lengths" default="0.8,0.8,0.8" />
+  <arg name="obstacle_widths" default="0.8,0.7,0.7" />
+  <arg name="obstacle_yaws" default="0.06,-0.09,0.04" />
+  <arg name="obstacle_x_vels" default="" />
+  <arg name="obstacle_y_vels" default="" />
+  <arg name="obstacle_csv" default="" />
+  <arg name="obstacle_source_scenario" default="" />
+
+  <node pkg="emplanner"
+        type="emplanner_compare_benchmark"
+        name="emplanner_compare_benchmark"
+        output="screen">
+    <param name="scenario_name" value="$(arg scenario_name)" />
+    <param name="floor" value="$(arg floor)" />
+    <param name="task_type" value="$(arg task_type)" />
+    <param name="is_indoor" value="$(arg is_indoor)" />
+    <param name="plan_iterations" value="$(arg plan_iterations)" />
+    <param name="advance_vehicle" value="$(arg advance_vehicle)" />
+    <param name="plan_step" value="$(arg plan_step)" />
+    <param name="car_speed" value="$(arg car_speed)" />
+    <param name="car_stop_flag" value="$(arg car_stop_flag)" />
+    <param name="plan_time" value="$(arg plan_time)" />
+    <param name="speed_plan_t_dt" value="$(arg speed_plan_t_dt)" />
+    <param name="st_s_min_step" value="$(arg st_s_min_step)" />
+    <param name="speed_plan_distance" value="$(arg speed_plan_distance)" />
+    <param name="st_lateral_limit" value="$(arg st_lateral_limit)" />
+    <param name="dynamic_vel_threshold" value="$(arg dynamic_vel_threshold)" />
+    <param name="speed_reference" value="$(arg speed_reference)" />
+    <param name="speed_dp_ref_vel_weight" value="$(arg speed_dp_ref_vel_weight)" />
+    <param name="speed_dp_hard_distance" value="$(arg speed_dp_hard_distance)" />
+    <param name="dp_vel_max" value="$(arg dp_vel_max)" />
+    <param name="dp_a_max" value="$(arg dp_a_max)" />
+    <param name="speed_dp_soft_distance" value="$(arg speed_dp_soft_distance)" />
+    <param name="speed_qp_ref_s_weight" value="$(arg speed_qp_ref_s_weight)" />
+    <param name="speed_qp_safe_distance" value="$(arg speed_qp_safe_distance)" />
+    <param name="speed_qp_v_max" value="$(arg speed_qp_v_max)" />
+    <param name="speed_qp_a_max" value="$(arg speed_qp_a_max)" />
+
+    <param name="use_straight_trajectory" value="$(arg use_straight_trajectory)" />
+    <param name="straight_start_x" value="$(arg straight_start_x)" />
+    <param name="straight_start_y" value="$(arg straight_start_y)" />
+    <param name="straight_length" value="$(arg straight_length)" />
+    <param name="straight_step" value="$(arg straight_step)" />
+    <param name="straight_turn_x" value="$(arg straight_turn_x)" />
+    <param name="straight_turn_angle_deg" value="$(arg straight_turn_angle_deg)" />
+    <param name="straight_turn_arc_length" value="$(arg straight_turn_arc_length)" />
+    <param name="turn_angle_case" value="$(arg turn_angle_case)" type="str" />
+    <param name="turn_shape_case" value="$(arg turn_shape_case)" type="str" />
+    <param name="second_turn_gap" value="$(arg second_turn_gap)" />
+    <param name="second_turn_angle_deg" value="$(arg second_turn_angle_deg)" />
+    <param name="second_turn_arc_length" value="$(arg second_turn_arc_length)" />
+
+    <param name="use_rl_dp" value="$(arg use_rl_dp)" />
+    <param name="sample_s" value="$(arg sample_s)" />
+    <param name="sample_l" value="$(arg sample_l)" />
+    <param name="sample_s_num" value="$(arg sample_s_num)" />
+    <param name="sample_s_per_meters" value="$(arg sample_s_per_meters)" />
+    <param name="col_node_num" value="$(arg col_node_num)" />
+    <param name="row_node_num" value="$(arg row_node_num)" />
+    <param name="rl_dp_s_samples" value="$(arg rl_dp_s_samples)" />
+    <param name="rl_dp_s_max" value="$(arg rl_dp_s_max)" />
+
+    <param name="w_qp_l" value="$(arg w_qp_l)" />
+    <param name="w_qp_dl" value="$(arg w_qp_dl)" />
+    <param name="w_qp_ddl" value="$(arg w_qp_ddl)" />
+    <param name="w_qp_ref_dp" value="$(arg w_qp_ref_dp)" />
+
+    <param name="obstacle_centers_x" value="$(arg obstacle_centers_x)" type="str" />
+    <param name="obstacle_centers_y" value="$(arg obstacle_centers_y)" type="str" />
+    <param name="obstacle_lengths" value="$(arg obstacle_lengths)" type="str" />
+    <param name="obstacle_widths" value="$(arg obstacle_widths)" type="str" />
+    <param name="obstacle_yaws" value="$(arg obstacle_yaws)" type="str" />
+    <param name="obstacle_x_vels" value="$(arg obstacle_x_vels)" type="str" />
+    <param name="obstacle_y_vels" value="$(arg obstacle_y_vels)" type="str" />
+    <param name="obstacle_csv" value="$(arg obstacle_csv)" type="str" />
+    <param name="obstacle_source_scenario" value="$(arg obstacle_source_scenario)" type="str" />
+  </node>
+</launch>

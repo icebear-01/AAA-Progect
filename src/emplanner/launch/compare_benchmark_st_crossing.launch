@@ -1,0 +1,67 @@
+<launch>
+  <arg name="scenario_name" default="st_crossing_straight_demo" />
+  <arg name="plan_iterations" default="1" />
+  <arg name="car_speed" default="0.8" />
+  <arg name="plan_time" default="4.0" />
+  <arg name="speed_plan_t_dt" default="0.25" />
+  <arg name="st_s_min_step" default="0.05" />
+  <arg name="speed_plan_distance" default="5.0" />
+  <arg name="st_lateral_limit" default="1.0" />
+  <arg name="speed_reference" default="1.0" />
+  <arg name="dp_vel_max" default="1.2" />
+  <arg name="dp_a_max" default="1.2" />
+  <arg name="speed_qp_safe_distance" default="0.15" />
+  <arg name="speed_qp_v_max" default="1.2" />
+  <arg name="speed_qp_a_max" default="0.8" />
+  <arg name="sample_s" default="0.8" />
+  <arg name="col_node_num" default="10" />
+  <arg name="row_node_num" default="19" />
+  <arg name="w_qp_l" default="800" />
+  <arg name="w_qp_dl" default="2000" />
+  <arg name="w_qp_ddl" default="10000" />
+  <arg name="w_qp_ref_dp" default="50" />
+  <arg name="obstacle_centers_x" default="1.8,3.0,4.2,5.4" />
+  <arg name="obstacle_centers_y" default="1.8,-1.9,1.7,-1.8" />
+  <arg name="obstacle_lengths" default="0.8,0.8,0.8,0.8" />
+  <arg name="obstacle_widths" default="0.6,0.6,0.6,0.6" />
+  <arg name="obstacle_yaws" default="-0.18,0.16,-0.20,0.18" />
+  <arg name="obstacle_x_vels" default="0.20,0.22,0.20,0.24" />
+  <arg name="obstacle_y_vels" default="-0.80,0.75,-0.70,0.78" />
+
+  <include file="$(find emplanner)/launch/compare_benchmark.launch">
+    <arg name="scenario_name" value="$(arg scenario_name)" />
+    <arg name="plan_iterations" value="$(arg plan_iterations)" />
+    <arg name="car_speed" value="$(arg car_speed)" />
+    <arg name="plan_time" value="$(arg plan_time)" />
+    <arg name="speed_plan_t_dt" value="$(arg speed_plan_t_dt)" />
+    <arg name="st_s_min_step" value="$(arg st_s_min_step)" />
+    <arg name="speed_plan_distance" value="$(arg speed_plan_distance)" />
+    <arg name="st_lateral_limit" value="$(arg st_lateral_limit)" />
+    <arg name="speed_reference" value="$(arg speed_reference)" />
+    <arg name="dp_vel_max" value="$(arg dp_vel_max)" />
+    <arg name="dp_a_max" value="$(arg dp_a_max)" />
+    <arg name="speed_qp_safe_distance" value="$(arg speed_qp_safe_distance)" />
+    <arg name="speed_qp_v_max" value="$(arg speed_qp_v_max)" />
+    <arg name="speed_qp_a_max" value="$(arg speed_qp_a_max)" />
+    <arg name="use_straight_trajectory" value="true" />
+    <arg name="straight_length" value="10.0" />
+    <arg name="straight_step" value="0.1" />
+    <arg name="turn_angle_case" value="0" />
+    <arg name="turn_shape_case" value="single_arc" />
+    <arg name="use_rl_dp" value="false" />
+    <arg name="sample_s" value="$(arg sample_s)" />
+    <arg name="col_node_num" value="$(arg col_node_num)" />
+    <arg name="row_node_num" value="$(arg row_node_num)" />
+    <arg name="w_qp_l" value="$(arg w_qp_l)" />
+    <arg name="w_qp_dl" value="$(arg w_qp_dl)" />
+    <arg name="w_qp_ddl" value="$(arg w_qp_ddl)" />
+    <arg name="w_qp_ref_dp" value="$(arg w_qp_ref_dp)" />
+    <arg name="obstacle_centers_x" value="$(arg obstacle_centers_x)" />
+    <arg name="obstacle_centers_y" value="$(arg obstacle_centers_y)" />
+    <arg name="obstacle_lengths" value="$(arg obstacle_lengths)" />
+    <arg name="obstacle_widths" value="$(arg obstacle_widths)" />
+    <arg name="obstacle_yaws" value="$(arg obstacle_yaws)" />
+    <arg name="obstacle_x_vels" value="$(arg obstacle_x_vels)" />
+    <arg name="obstacle_y_vels" value="$(arg obstacle_y_vels)" />
+  </include>
+</launch>

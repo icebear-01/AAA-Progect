@@ -1,0 +1,2 @@
+/usr/bin/ar qc libdp_planner.a  CMakeFiles/dp_planner.dir/dp_planner.cpp.o
+/usr/bin/ranlib libdp_planner.a

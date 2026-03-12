@@ -1,0 +1,25 @@
+<launch>
+    <arg name="world_frame" default="velodyne"/>
+    <arg name="refresh_period" default="2.0"/>
+    <arg name="auto_refresh" default="true"/>
+
+    <node pkg="hybrid_a_star" type="random_parking_env" name="random_parking_env" output="screen">
+        <param name="random_env/world_frame" value="$(arg world_frame)"/>
+        <param name="random_env/refresh_period" value="$(arg refresh_period)"/>
+        <param name="random_env/auto_refresh" value="$(arg auto_refresh)"/>
+        <param name="random_env/boundary_length" value="22.0"/>
+        <param name="random_env/boundary_width" value="16.0"/>
+        <param name="random_env/min_obstacles" value="4"/>
+        <param name="random_env/max_obstacles" value="8"/>
+        <param name="random_env/start_clearance" value="1.5"/>
+        <param name="random_env/goal_clearance" value="2.0"/>
+        <param name="random_env/slot_columns" value="5"/>
+        <param name="random_env/slot_rows" value="3"/>
+        <param name="random_env/slot_spacing" value="3.0"/>
+        <param name="random_env/slot_row_spacing" value="6.0"/>
+        <param name="random_env/slot_keepout" value="0.75"/>
+    </node>
+
+    <node pkg="rviz" type="rviz" name="random_parking_env_rviz"
+          args="-d $(find hybrid_a_star)/rviz/vertical_parking_env.rviz"/>
+</launch>

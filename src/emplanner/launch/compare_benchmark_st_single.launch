@@ -1,0 +1,47 @@
+<launch>
+  <arg name="scenario_name" default="st_single_case" />
+  <arg name="obstacle_csv" default="" />
+  <arg name="obstacle_source_scenario" default="" />
+
+  <arg name="car_speed" default="0.8" />
+  <arg name="speed_plan_t_dt" default="0.25" />
+  <arg name="st_s_min_step" default="0.05" />
+  <arg name="st_lateral_limit" default="1.0" />
+  <arg name="speed_reference" default="1.0" />
+  <arg name="speed_dp_ref_vel_weight" default="2000.0" />
+  <arg name="speed_dp_hard_distance" default="0.15" />
+  <arg name="dp_vel_max" default="2.0" />
+  <arg name="dp_a_max" default="1.2" />
+  <arg name="speed_dp_soft_distance" default="0.5" />
+  <arg name="speed_qp_ref_s_weight" default="0.0" />
+  <arg name="speed_qp_safe_distance" default="0.30" />
+  <arg name="speed_qp_v_max" default="2.0" />
+  <arg name="speed_qp_a_max" default="0.5" />
+
+  <include file="$(find emplanner)/launch/compare_benchmark.launch">
+    <arg name="scenario_name" value="$(arg scenario_name)" />
+    <arg name="plan_iterations" value="1" />
+    <arg name="use_straight_trajectory" value="true" />
+    <arg name="turn_angle_case" value="0" />
+    <arg name="turn_shape_case" value="single_arc" />
+    <arg name="use_rl_dp" value="false" />
+
+    <arg name="car_speed" value="$(arg car_speed)" />
+    <arg name="speed_plan_t_dt" value="$(arg speed_plan_t_dt)" />
+    <arg name="st_s_min_step" value="$(arg st_s_min_step)" />
+    <arg name="st_lateral_limit" value="$(arg st_lateral_limit)" />
+    <arg name="speed_reference" value="$(arg speed_reference)" />
+    <arg name="speed_dp_ref_vel_weight" value="$(arg speed_dp_ref_vel_weight)" />
+    <arg name="speed_dp_hard_distance" value="$(arg speed_dp_hard_distance)" />
+    <arg name="dp_vel_max" value="$(arg dp_vel_max)" />
+    <arg name="dp_a_max" value="$(arg dp_a_max)" />
+    <arg name="speed_dp_soft_distance" value="$(arg speed_dp_soft_distance)" />
+    <arg name="speed_qp_ref_s_weight" value="$(arg speed_qp_ref_s_weight)" />
+    <arg name="speed_qp_safe_distance" value="$(arg speed_qp_safe_distance)" />
+    <arg name="speed_qp_v_max" value="$(arg speed_qp_v_max)" />
+    <arg name="speed_qp_a_max" value="$(arg speed_qp_a_max)" />
+
+    <arg name="obstacle_csv" value="$(arg obstacle_csv)" />
+    <arg name="obstacle_source_scenario" value="$(arg obstacle_source_scenario)" />
+  </include>
+</launch>

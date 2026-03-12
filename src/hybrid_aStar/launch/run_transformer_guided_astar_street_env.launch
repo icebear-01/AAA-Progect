@@ -1,0 +1,77 @@
+<launch>
+  <arg name="world_frame" default="velodyne"/>
+  <arg name="launch_rviz" default="true"/>
+  <arg name="street_split" default="train"/>
+  <arg name="street_map_index" default="0"/>
+  <arg name="random_index" default="false"/>
+  <arg name="auto_refresh" default="false"/>
+  <arg name="refresh_period" default="5.0"/>
+  <arg name="map_resolution" default="0.25"/>
+  <arg name="street_dataset_path" default="$(find hybrid_a_star)/model_base_astar/neural-astar/planning-datasets/data/street/mixed_064_moore_c16.npz"/>
+
+  <arg name="guided_frontend_backend" default="onnx"/>
+  <arg name="fallback_to_hybrid_astar" default="false"/>
+  <arg name="guided_frontend_device" default="cpu"/>
+
+  <arg name="guided_frontend_lambda" default="1.0"/>
+  <arg name="guided_frontend_heuristic_weight" default="1.0"/>
+  <arg name="guided_frontend_heuristic_mode" default="octile"/>
+  <arg name="guided_frontend_integration_mode" default="g_cost"/>
+  <arg name="guided_frontend_bonus_threshold" default="0.5"/>
+  <arg name="guided_frontend_allow_corner_cut" default="false"/>
+  <arg name="guided_frontend_invert_guidance_cost" default="false"/>
+
+  <node pkg="hybrid_a_star" type="frontend_street_map_env_cpp" name="frontend_street_map_env" output="screen">
+    <param name="frontend_street_map/world_frame" value="$(arg world_frame)"/>
+    <param name="frontend_street_map/map_topic" value="/guided_frontend_street_map"/>
+    <param name="frontend_street_map/marker_topic" value="/guided_frontend_street_map/markers"/>
+    <param name="frontend_street_map/car_pose_topic" value="/car_pos"/>
+    <param name="frontend_street_map/dataset_path" value="$(arg street_dataset_path)"/>
+    <param name="frontend_street_map/split" value="$(arg street_split)"/>
+    <param name="frontend_street_map/map_index" value="$(arg street_map_index)"/>
+    <param name="frontend_street_map/random_index" value="$(arg random_index)"/>
+    <param name="frontend_street_map/auto_refresh" value="$(arg auto_refresh)"/>
+    <param name="frontend_street_map/refresh_period" value="$(arg refresh_period)"/>
+    <param name="frontend_street_map/resolution" value="$(arg map_resolution)"/>
+    <param name="frontend_street_map/publish_default_start" value="true"/>
+  </node>
+
+  <node pkg="hybrid_a_star" type="run_hybrid_astar" name="run_guided_astar" output="screen">
+    <param name="planner/steering_angle" value="25.0"/>
+    <param name="planner/steering_angle_discrete_num" value="10"/>
+    <param name="planner/wheel_base" value="0.8"/>
+    <param name="planner/segment_length" value="1.0"/>
+    <param name="planner/segment_length_discrete_num" value="10"/>
+    <param name="planner/steering_penalty" value="2.0"/>
+    <param name="planner/reversing_penalty" value="3.0"/>
+    <param name="planner/steering_change_penalty" value="10.0"/>
+    <param name="planner/shot_distance" value="6.0"/>
+    <param name="planner/grid_obstacle_resolution" value="$(arg map_resolution)"/>
+    <param name="planner/grid_state_resolution" value="1.25"/>
+    <param name="planner/static_map_source" value="occupancy_grid"/>
+    <param name="planner/static_map_topic" value="/guided_frontend_street_map"/>
+    <param name="planner/static_map_timeout" value="5.0"/>
+    <param name="planner/static_map_fallback_to_pcd" value="false"/>
+
+    <param name="planner/use_transformer_guided_frontend" value="true"/>
+    <param name="planner/fallback_to_hybrid_astar" value="$(arg fallback_to_hybrid_astar)"/>
+    <param name="planner/guided_frontend_backend" value="$(arg guided_frontend_backend)"/>
+    <param name="planner/guided_frontend_python" value="python3"/>
+    <param name="planner/guided_frontend_script" value="$(find hybrid_a_star)/model_base_astar/neural-astar/scripts/run_transformer_guided_astar_frontend.py"/>
+    <param name="planner/guided_frontend_ckpt" value="$(find hybrid_a_star)/model_base_astar/neural-astar/outputs/model_guidance_street/best.pt"/>
+    <param name="planner/guided_frontend_onnx" value="$(find hybrid_a_star)/model_base_astar/neural-astar/outputs/model_guidance_street/best_cost_map.onnx"/>
+    <param name="planner/guided_frontend_device" value="$(arg guided_frontend_device)"/>
+    <param name="planner/guided_frontend_onnx_intra_threads" value="1"/>
+    <param name="planner/guided_frontend_onnx_inter_threads" value="1"/>
+    <param name="planner/guided_frontend_lambda" value="$(arg guided_frontend_lambda)"/>
+    <param name="planner/guided_frontend_heuristic_weight" value="$(arg guided_frontend_heuristic_weight)"/>
+    <param name="planner/guided_frontend_heuristic_mode" value="$(arg guided_frontend_heuristic_mode)"/>
+    <param name="planner/guided_frontend_integration_mode" value="$(arg guided_frontend_integration_mode)"/>
+    <param name="planner/guided_frontend_bonus_threshold" value="$(arg guided_frontend_bonus_threshold)"/>
+    <param name="planner/guided_frontend_allow_corner_cut" value="$(arg guided_frontend_allow_corner_cut)"/>
+    <param name="planner/guided_frontend_invert_guidance_cost" value="$(arg guided_frontend_invert_guidance_cost)"/>
+  </node>
+
+  <node if="$(arg launch_rviz)" pkg="rviz" type="rviz" name="guided_astar_street_env_rviz"
+        args="-d $(find hybrid_a_star)/rviz/guided_astar_street_env.rviz"/>
+</launch>

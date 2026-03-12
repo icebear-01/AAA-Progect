@@ -1,0 +1,47 @@
+<launch>
+    <!-- <arg name="fixed_frame" default="world"/> -->
+
+    <!-- <param name="robot_description" textfile="$(find hybrid_a_star)/model/car_model/default.urdf"/>
+    <node pkg="joint_state_publisher" type="joint_state_publisher" name="joint_state_publisher"/>
+    <node pkg="robot_state_publisher" type="robot_state_publisher" name="robot_state_publisher"/> -->
+
+    <!-- <node pkg="rviz" type="rviz" name="rviz" args="-d $(find hybrid_a_star)/rviz/display_hybrid_astar.rviz"/> -->
+
+    <!--static_transform_publisher x y z yaw pitch roll frame_id child_frame_id period_in_ms-->
+    <!-- <node pkg="tf" type="static_transform_publisher" name="link1_broadcaster"
+          args="0 0 0 0 0 0 world map 100"/>
+
+    <node pkg="map_server" type="map_server" name="map_server" args="$(find hybrid_a_star)/maps/map.yaml"/> -->
+
+    <node pkg="hybrid_a_star" type="run_hybrid_astar" name="run_hybrid_astar" output="screen">
+        <param name="planner/steering_angle" value="25.0"/>              <!-- 单个栅格转弯的最大角度 -->
+        <param name="planner/steering_angle_discrete_num" value="10"/>    <!-- 最大角度分为几个角度 -->
+        <param name="planner/wheel_base" value="0.8"/>
+        <param name="planner/segment_length" value="1.0"/>               <!-- 搜索路径长度 -->
+        <param name="planner/segment_length_discrete_num" value="10"/>  
+        <param name="planner/steering_penalty" value="2.0"/>
+        <param name="planner/reversing_penalty" value="3.0"/>
+        <param name="planner/steering_change_penalty" value="10.0"/>
+        <param name="planner/shot_distance" value="6.0"/>
+        <param name="planner/grid_obstacle_resolution" value="0.25"/>    <!-- 障碍物地图栅格分辨率 -->
+        <param name="planner/grid_state_resolution" value="1.25"/>        <!-- 状态栅格分辨率 -->
+        <param name="planner/use_transformer_guided_frontend" value="false"/>
+        <param name="planner/fallback_to_hybrid_astar" value="true"/>
+        <param name="planner/guided_frontend_backend" value="python"/>
+        <param name="planner/guided_frontend_python" value="python3"/>
+        <param name="planner/guided_frontend_script" value="$(find hybrid_a_star)/model_base_astar/neural-astar/scripts/run_transformer_guided_astar_frontend.py"/>
+        <param name="planner/guided_frontend_ckpt" value="$(find hybrid_a_star)/model_base_astar/neural-astar/outputs/model_guidance_grid_mpd_unet_transformer_v3_gatedskip_formal_v1/best.pt"/>
+        <param name="planner/guided_frontend_onnx" value="$(find hybrid_a_star)/model_base_astar/neural-astar/outputs/model_guidance_grid_mpd_unet_transformer_v3_gatedskip_formal_v1/best_cost_map.onnx"/>
+        <param name="planner/guided_frontend_device" value="cpu"/>
+        <param name="planner/guided_frontend_onnx_intra_threads" value="1"/>
+        <param name="planner/guided_frontend_onnx_inter_threads" value="1"/>
+        <param name="planner/guided_frontend_lambda" value="1.0"/>
+        <param name="planner/guided_frontend_heuristic_weight" value="1.0"/>
+        <param name="planner/guided_frontend_heuristic_mode" value="octile"/>
+        <param name="planner/guided_frontend_integration_mode" value="g_cost"/>
+        <param name="planner/guided_frontend_bonus_threshold" value="0.5"/>
+        <param name="planner/guided_frontend_allow_corner_cut" value="false"/>
+        <param name="planner/guided_frontend_invert_guidance_cost" value="false"/>
+    </node>
+
+</launch>

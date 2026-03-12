@@ -1,0 +1,9 @@
+group,case_name,case_label,obstacle_count,planner_total_ms,dp_sampling_ms,qp_optimization_ms,speed_planning_ms,dp_mean_abs_kappa,qp_mean_abs_kappa,dp_max_abs_kappa,qp_max_abs_kappa,dp_source
+path_gallery,straight_case_multi_obs_paper,直道多障碍,3,,,,,0.728587,0.229705,4.033767,0.940556,classic
+path_gallery,turn_60_deg_arc,60°弯道,7,206.257403,187.441392,18.074841,0.000000,0.826349,0.277069,4.033063,0.801325,classic
+path_gallery,curve_turn30_feasible,30°曲线,7,237.962953,199.956123,37.154008,0.000000,0.808143,0.378398,4.033063,0.946889,classic
+path_gallery,s_curve_x2_y2_demo,S形弯道,7,256.407559,230.797828,24.639716,0.000000,0.605799,0.281092,2.952988,0.766705,classic
+speed_gallery,st_single_dynamic_fast,单动态障碍,1,26.716648,22.101538,2.750432,1.030153,0.000000,0.000000,0.000000,0.000000,classic
+speed_gallery,my_st_case_replay,跟驰复现,3,26.364934,20.611093,2.467202,2.457741,0.000000,0.000000,0.000000,0.000000,classic
+speed_gallery,st_multi_default_check,多障碍巡航,2,29.130330,23.390598,2.856141,1.942464,0.000000,0.000000,0.000000,0.000000,classic
+speed_gallery,st_crossing_straight_demo_tuned,横穿避让,4,96.727834,86.170609,6.542555,1.841020,0.000000,0.000000,0.000000,0.000000,classic

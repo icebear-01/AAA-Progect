@@ -1,0 +1,2 @@
+id,is_consider,is_dynamic,x,y,s,l,min_s,max_s,min_l,max_l,s_vel,l_vel,t_in,t_out,s_in,s_out,corner0_s,corner0_l,corner1_s,corner1_l,corner2_s,corner2_l,corner3_s,corner3_l
+0,0,0,2.500000,0.200000,1.864299,1.021665,0.865435,2.863162,0.529615,1.513715,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,2.863162,1.513715,2.785197,0.716059,0.865435,1.241589,1.279766,0.529615

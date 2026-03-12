@@ -1,0 +1,2 @@
+/usr/bin/ar qc libdp_policy.a  CMakeFiles/dp_policy.dir/dp_policy.cpp.o
+/usr/bin/ranlib libdp_policy.a

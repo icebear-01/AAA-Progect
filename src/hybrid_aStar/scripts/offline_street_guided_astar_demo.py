@@ -1,0 +1,940 @@
+#!/usr/bin/env python3
+"""Offline street-map demo: model-guided A* frontend + C++ backend smoothing."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import math
+import random
+import subprocess
+import sys
+from pathlib import Path
+from typing import Iterable, List, Sequence, Tuple
+
+import matplotlib.pyplot as plt
+import numpy as np
+import yaml
+from matplotlib.colors import ListedColormap, to_rgba
+from matplotlib import patheffects as pe
+
+
+SCRIPT_PATH = Path(__file__).resolve()
+HYBRID_ASTAR_ROOT = SCRIPT_PATH.parent.parent
+REPO_SRC_ROOT = HYBRID_ASTAR_ROOT.parent.parent.parent
+PLOT_DPI = 600
+NEURAL_ASTAR_SRC = HYBRID_ASTAR_ROOT / "model_base_astar" / "neural-astar" / "src"
+if str(NEURAL_ASTAR_SRC) not in sys.path:
+    sys.path.insert(0, str(NEURAL_ASTAR_SRC))
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Offline street demo for transformer-guided A* frontend and HybridAStar smoother"
+    )
+    parser.add_argument(
+        "--dataset",
+        type=Path,
+        default=HYBRID_ASTAR_ROOT
+        / "model_base_astar"
+        / "neural-astar"
+        / "planning-datasets"
+        / "data"
+        / "street"
+        / "mixed_064_moore_c16.npz",
+    )
+    parser.add_argument(
+        "--ckpt",
+        type=Path,
+        default=HYBRID_ASTAR_ROOT
+        / "model_base_astar"
+        / "neural-astar"
+        / "outputs"
+        / "model_guidance_street"
+        / "best.pt",
+    )
+    parser.add_argument(
+        "--smoother-cli",
+        type=Path,
+        default=REPO_SRC_ROOT.parent / "devel" / "lib" / "hybrid_a_star" / "smooth_path_cli",
+    )
+    parser.add_argument("--split", choices=["train", "valid", "test"], default="train")
+    parser.add_argument("--map-index", type=int, default=-1, help="negative means random index")
+    parser.add_argument("--seed", type=int, default=123)
+    parser.add_argument("--device", type=str, default="cpu")
+    parser.add_argument("--resolution", type=float, default=0.25)
+    parser.add_argument("--origin-x", type=float, default=0.0)
+    parser.add_argument("--origin-y", type=float, default=0.0)
+    parser.add_argument("--lambda-guidance", type=float, default=1.0)
+    parser.add_argument("--heuristic-mode", type=str, default="octile")
+    parser.add_argument("--heuristic-weight", type=float, default=1.0)
+    parser.add_argument("--guidance-integration-mode", type=str, default="g_cost")
+    parser.add_argument("--guidance-bonus-threshold", type=float, default=0.5)
+    parser.add_argument("--allow-corner-cut", action="store_true")
+    parser.add_argument("--invert-guidance-cost", action="store_true")
+    parser.add_argument("--min-start-goal-dist", type=float, default=22.0, help="grid-cell distance")
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=HYBRID_ASTAR_ROOT / "offline_results" / "street_guided_demo",
+    )
+    parser.add_argument("--case-name", type=str, default="demo")
+    parser.add_argument("--plot-only", action="store_true")
+    parser.add_argument("--input-dir", type=Path, default=None)
+    return parser.parse_args()
+
+
+def _load_python_frontend():
+    from hybrid_astar_guided.grid_astar import astar_8conn  # type: ignore
+    from neural_astar.api.guidance_infer import infer_cost_map  # type: ignore
+
+    return astar_8conn, infer_cost_map
+
+
+def _split_key(split: str) -> str:
+    return {"train": "arr_0", "valid": "arr_4", "test": "arr_8"}[split]
+
+
+def load_street_occ(dataset: Path, split: str, map_index: int, rng: random.Random) -> Tuple[np.ndarray, int]:
+    with np.load(dataset) as data:
+        key = _split_key(split)
+        arr = np.asarray(data[key], dtype=np.float32)
+        if arr.ndim != 3:
+            raise ValueError(f"{key} must be [N,H,W], got {arr.shape}")
+        if map_index < 0:
+            map_index = rng.randrange(arr.shape[0])
+        if not (0 <= map_index < arr.shape[0]):
+            raise ValueError(f"map_index {map_index} out of range [0, {arr.shape[0]})")
+        # street dataset uses 1=free, 0=obstacle
+        occ = 1.0 - arr[map_index]
+        return occ.astype(np.float32), map_index
+
+
+def random_free_xy(occ: np.ndarray, rng: random.Random) -> Tuple[int, int]:
+    h, w = occ.shape
+    for _ in range(10000):
+        x = rng.randrange(w)
+        y = rng.randrange(h)
+        if occ[y, x] < 0.5:
+            return x, y
+    raise RuntimeError("failed to sample a free cell")
+
+
+def sample_problem(
+    occ: np.ndarray,
+    rng: random.Random,
+    min_start_goal_dist: float,
+    origin_x: float,
+    origin_y: float,
+    resolution: float,
+    collision_grid_resolution: float,
+) -> Tuple[Tuple[int, int], Tuple[int, int]]:
+    for _ in range(5000):
+        start_xy = random_free_xy(occ, rng)
+        goal_xy = random_free_xy(occ, rng)
+        if start_xy == goal_xy:
+            continue
+        start_world = grid_to_world(start_xy[0], start_xy[1], origin_x, origin_y, resolution)
+        goal_world = grid_to_world(goal_xy[0], goal_xy[1], origin_x, origin_y, resolution)
+        if not footprint16_collision_free_world(
+            occ, start_world[0], start_world[1], origin_x, origin_y, resolution, collision_grid_resolution
+        ):
+            continue
+        if not footprint16_collision_free_world(
+            occ, goal_world[0], goal_world[1], origin_x, origin_y, resolution, collision_grid_resolution
+        ):
+            continue
+        if math.hypot(goal_xy[0] - start_xy[0], goal_xy[1] - start_xy[1]) < min_start_goal_dist:
+            continue
+        if astar_8conn(occ, start_xy, goal_xy) is None:
+            continue
+        return start_xy, goal_xy
+    raise RuntimeError("failed to sample a solvable start/goal pair")
+
+
+def grid_to_world(
+    gx: int,
+    gy: int,
+    origin_x: float,
+    origin_y: float,
+    resolution: float,
+) -> Tuple[float, float]:
+    return origin_x + (gx + 0.5) * resolution, origin_y + (gy + 0.5) * resolution
+
+
+def world_to_grid(
+    x: float,
+    y: float,
+    origin_x: float,
+    origin_y: float,
+    resolution: float,
+) -> Tuple[float, float]:
+    return (x - origin_x) / resolution - 0.5, (y - origin_y) / resolution - 0.5
+
+
+def point_collision_free_world(
+    occ: np.ndarray,
+    x: float,
+    y: float,
+    origin_x: float,
+    origin_y: float,
+    resolution: float,
+) -> bool:
+    gx_f, gy_f = world_to_grid(x, y, origin_x, origin_y, resolution)
+    gx = int(round(gx_f))
+    gy = int(round(gy_f))
+    if gy < 0 or gy >= occ.shape[0] or gx < 0 or gx >= occ.shape[1]:
+        return False
+    return bool(occ[gy, gx] < 0.5)
+
+
+def footprint16_collision_free_world(
+    occ: np.ndarray,
+    x: float,
+    y: float,
+    origin_x: float,
+    origin_y: float,
+    resolution: float,
+    collision_grid_resolution: float,
+) -> bool:
+    offsets = (-1.5, -0.5, 0.5, 1.5)
+    for dx in offsets:
+        for dy in offsets:
+            if not point_collision_free_world(
+                occ,
+                x + dx * collision_grid_resolution,
+                y + dy * collision_grid_resolution,
+                origin_x,
+                origin_y,
+                resolution,
+            ):
+                return False
+    return True
+
+
+def segment_collision_free_world(
+    occ: np.ndarray,
+    a: Tuple[float, float],
+    b: Tuple[float, float],
+    origin_x: float,
+    origin_y: float,
+    resolution: float,
+) -> bool:
+    dx = b[0] - a[0]
+    dy = b[1] - a[1]
+    distance = math.hypot(dx, dy)
+    steps = max(2, int(math.ceil(distance / max(0.06, resolution * 0.25))))
+    for i in range(steps + 1):
+        ratio = i / steps
+        x = a[0] + dx * ratio
+        y = a[1] + dy * ratio
+        if not point_collision_free_world(occ, x, y, origin_x, origin_y, resolution):
+            return False
+    return True
+
+
+def simplify_collinear(path: Sequence[Tuple[float, float]], eps: float = 1e-6) -> List[Tuple[float, float]]:
+    if len(path) < 3:
+        return list(path)
+    simplified = [path[0]]
+    for i in range(1, len(path) - 1):
+        ax, ay = simplified[-1]
+        bx, by = path[i]
+        cx, cy = path[i + 1]
+        cross = (bx - ax) * (cy - by) - (by - ay) * (cx - bx)
+        if abs(cross) > eps:
+            simplified.append(path[i])
+    simplified.append(path[-1])
+    return simplified
+
+
+def shortcut_path(
+    occ: np.ndarray,
+    path: Sequence[Tuple[float, float]],
+    origin_x: float,
+    origin_y: float,
+    resolution: float,
+) -> List[Tuple[float, float]]:
+    if len(path) < 3:
+        return list(path)
+    anchors = [path[0]]
+    index = 0
+    while index < len(path) - 1:
+        best = index + 1
+        for candidate in range(len(path) - 1, index + 1, -1):
+            if segment_collision_free_world(occ, path[index], path[candidate], origin_x, origin_y, resolution):
+                best = candidate
+                break
+        anchors.append(path[best])
+        index = best
+    return anchors
+
+
+def chaikin_once(path: Sequence[Tuple[float, float]]) -> List[Tuple[float, float]]:
+    if len(path) < 3:
+        return list(path)
+    out = [path[0]]
+    for i in range(len(path) - 1):
+        p0 = np.asarray(path[i], dtype=np.float64)
+        p1 = np.asarray(path[i + 1], dtype=np.float64)
+        q = 0.75 * p0 + 0.25 * p1
+        r = 0.25 * p0 + 0.75 * p1
+        out.append((float(q[0]), float(q[1])))
+        out.append((float(r[0]), float(r[1])))
+    out.append(path[-1])
+    return out
+
+
+def path_collision_free(
+    occ: np.ndarray,
+    path: Sequence[Tuple[float, float]],
+    origin_x: float,
+    origin_y: float,
+    resolution: float,
+) -> bool:
+    return all(
+        segment_collision_free_world(occ, path[i], path[i + 1], origin_x, origin_y, resolution)
+        for i in range(len(path) - 1)
+    )
+
+
+def resample_path(path: Sequence[Tuple[float, float]], step: float) -> List[Tuple[float, float]]:
+    if len(path) < 2:
+        return list(path)
+    resampled = [path[0]]
+    for i in range(len(path) - 1):
+        ax, ay = path[i]
+        bx, by = path[i + 1]
+        dx = bx - ax
+        dy = by - ay
+        dist = math.hypot(dx, dy)
+        segments = max(1, int(math.ceil(dist / step)))
+        for seg in range(1, segments + 1):
+            ratio = seg / segments
+            resampled.append((ax + dx * ratio, ay + dy * ratio))
+    return resampled
+
+
+def cumulative_arc_length(path: Sequence[Tuple[float, float]]) -> np.ndarray:
+    if len(path) == 0:
+        return np.zeros((0,), dtype=np.float64)
+    s = np.zeros((len(path),), dtype=np.float64)
+    for i in range(1, len(path)):
+        dx = path[i][0] - path[i - 1][0]
+        dy = path[i][1] - path[i - 1][1]
+        s[i] = s[i - 1] + math.hypot(dx, dy)
+    return s
+
+
+def curvature_profile(path: Sequence[Tuple[float, float]], step: float = 0.10) -> Tuple[np.ndarray, np.ndarray]:
+    if len(path) < 3:
+        return np.zeros((0,), dtype=np.float64), np.zeros((0,), dtype=np.float64)
+    resampled = np.asarray(resample_path(path, step), dtype=np.float64)
+    if resampled.shape[0] < 3:
+        return np.zeros((0,), dtype=np.float64), np.zeros((0,), dtype=np.float64)
+    s = cumulative_arc_length([tuple(p) for p in resampled])
+    x = resampled[:, 0]
+    y = resampled[:, 1]
+    dx = np.gradient(x, s, edge_order=2)
+    dy = np.gradient(y, s, edge_order=2)
+    ddx = np.gradient(dx, s, edge_order=2)
+    ddy = np.gradient(dy, s, edge_order=2)
+    denom = np.maximum((dx * dx + dy * dy) ** 1.5, 1e-6)
+    kappa = (dx * ddy - dy * ddx) / denom
+    return s, kappa
+
+
+def preprocess_seed_path(
+    occ: np.ndarray,
+    raw_world_path: Sequence[Tuple[float, float]],
+    origin_x: float,
+    origin_y: float,
+    resolution: float,
+) -> List[Tuple[float, float]]:
+    seed = simplify_collinear(raw_world_path)
+    seed = shortcut_path(occ, seed, origin_x, origin_y, resolution)
+    for _ in range(2):
+        candidate = chaikin_once(seed)
+        if path_collision_free(occ, candidate, origin_x, origin_y, resolution):
+            seed = candidate
+        else:
+            break
+    seed = resample_path(seed, max(0.12, resolution * 0.6))
+    seed[0] = raw_world_path[0]
+    seed[-1] = raw_world_path[-1]
+    return seed
+
+
+def write_raw_path_csv(path: Path, world_path: Sequence[Tuple[float, float]]) -> None:
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["x", "y"])
+        for x, y in world_path:
+            writer.writerow([f"{x:.6f}", f"{y:.6f}"])
+
+
+def read_xy_path_csv(path: Path) -> List[Tuple[float, float]]:
+    points: List[Tuple[float, float]] = []
+    with path.open("r", newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            points.append((float(row["x"]), float(row["y"])))
+    if len(points) < 2:
+        raise RuntimeError(f"path csv is empty: {path}")
+    return points
+
+
+def read_smoothed_path_csv(path: Path) -> List[Tuple[float, float]]:
+    return read_xy_path_csv(path)
+
+
+def read_split_points_csv(path: Path) -> List[Tuple[int, float, float]]:
+    points: List[Tuple[int, float, float]] = []
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            points.append((int(row["index"]), float(row["x"]), float(row["y"])))
+    return points
+
+
+def write_smoother_yaml(
+    path: Path,
+    occ: np.ndarray,
+    raw_world_path: Sequence[Tuple[float, float]],
+    origin_x: float,
+    origin_y: float,
+    resolution: float,
+) -> None:
+    data = {
+        "map": {
+            "width": int(occ.shape[1]),
+            "height": int(occ.shape[0]),
+            "resolution": float(resolution),
+            "collision_grid_resolution": 0.125,
+            "origin_x": float(origin_x),
+            "origin_y": float(origin_y),
+            "state_grid_resolution": 1.0,
+            "steering_angle": 10.0,
+            "steering_angle_discrete_num": 1,
+            "wheel_base": 0.8,
+            "segment_length": 1.6,
+            "segment_length_discrete_num": 8,
+            "steering_penalty": 1.05,
+            "reversing_penalty": 2.0,
+            "steering_change_penalty": 1.5,
+            "shot_distance": 5.0,
+            "seed_resample_step": 0.10,
+            "simplified_collision_check": True,
+            "fix_endpoint_heading": False,
+            "occupancy": occ.astype(int).tolist(),
+        },
+        "raw_path": [[float(x), float(y)] for x, y in raw_world_path],
+    }
+    with path.open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(data, handle, sort_keys=False)
+
+
+def write_matrix_csv(path: Path, matrix: np.ndarray) -> None:
+    np.savetxt(path, matrix, delimiter=",", fmt="%.6f")
+
+
+def load_matrix_csv(path: Path) -> np.ndarray:
+    matrix = np.loadtxt(path, delimiter=",")
+    if matrix.ndim == 1:
+        matrix = matrix[None, :]
+    return matrix
+
+
+def plot_case(
+    occ: np.ndarray,
+    cost_map: np.ndarray,
+    raw_world_path: Sequence[Tuple[float, float]],
+    seed_world_path: Sequence[Tuple[float, float]],
+    smoothed_world_path: Sequence[Tuple[float, float]],
+    start_xy: Tuple[int, int],
+    goal_xy: Tuple[int, int],
+    origin_x: float,
+    origin_y: float,
+    resolution: float,
+    out_path: Path,
+    split_world_points: Sequence[Tuple[int, float, float]] | None = None,
+) -> None:
+    fig, axes = plt.subplots(1, 2, figsize=(12.2, 5.6), facecolor="#fbfbf8")
+    map_cmap = ListedColormap(["#f2f1ea", "#7b7b7f"])
+    overlay_rgba = np.zeros((*cost_map.shape, 4), dtype=np.float32)
+    cost_min = float(np.min(cost_map))
+    cost_max = float(np.max(cost_map))
+    cost_norm = (cost_map - cost_min) / max(1e-6, cost_max - cost_min)
+    guidance_score = np.clip(1.0 - cost_norm, 0.0, 1.0)
+    guidance_alpha = np.clip((guidance_score - 0.22) / 0.78, 0.0, 1.0) ** 1.2
+    overlay_rgba[..., :3] = np.asarray(to_rgba("#d9e5c6"))[:3]
+    overlay_rgba[..., 3] = guidance_alpha * 0.34
+
+    route_outline = [pe.Stroke(linewidth=1.2, foreground="#fffef8"), pe.Normal()]
+    smooth_outline = [pe.Stroke(linewidth=1.35, foreground="#fffef8"), pe.Normal()]
+
+    for ax in axes:
+        ax.imshow(occ, cmap=map_cmap, origin="upper", interpolation="nearest", vmin=0.0, vmax=1.0)
+        ax.set_aspect("equal")
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_facecolor("#f2f1ea")
+        for spine in ax.spines.values():
+            spine.set_linewidth(0.9)
+            spine.set_edgecolor("#9a988f")
+
+    axes[0].imshow(overlay_rgba, origin="upper", interpolation="nearest")
+    raw_grid = np.asarray(
+        [world_to_grid(x, y, origin_x, origin_y, resolution) for x, y in raw_world_path], dtype=np.float32
+    )
+    seed_grid = np.asarray(
+        [world_to_grid(x, y, origin_x, origin_y, resolution) for x, y in seed_world_path], dtype=np.float32
+    )
+    smooth_grid = np.asarray(
+        [world_to_grid(x, y, origin_x, origin_y, resolution) for x, y in smoothed_world_path], dtype=np.float32
+    )
+    split_grid = []
+    if split_world_points:
+        split_grid = [
+            (idx, *world_to_grid(x, y, origin_x, origin_y, resolution)) for idx, x, y in split_world_points
+        ]
+
+    sx, sy = start_xy
+    gx, gy = goal_xy
+    for ax in axes:
+        ax.scatter([sx], [sy], c="#e63b2e", s=60, marker="x", linewidths=1.7, label="Start", zorder=7)
+        ax.scatter([gx], [gy], c="#31c93c", s=42, marker="o", label="Goal", zorder=7)
+
+    axes[0].plot(
+        raw_grid[:, 0],
+        raw_grid[:, 1],
+        color="#7ecf48",
+        linewidth=1.1,
+        solid_capstyle="round",
+        solid_joinstyle="round",
+        label="Model Route",
+        zorder=5,
+        path_effects=route_outline,
+    )
+    axes[0].text(
+        0.02,
+        0.98,
+        "(a) Transformer-Guided A*",
+        transform=axes[0].transAxes,
+        ha="left",
+        va="top",
+        fontsize=11,
+        fontweight="semibold",
+        color="#222222",
+    )
+    axes[0].legend(
+        loc="upper center",
+        fontsize=9,
+        framealpha=0.94,
+        ncol=3,
+        facecolor="#fffef9",
+        edgecolor="#c5c2b8",
+    )
+
+    axes[1].plot(
+        raw_grid[:, 0],
+        raw_grid[:, 1],
+        color="#b8b3a1",
+        linewidth=1.0,
+        alpha=0.95,
+        linestyle="--",
+        label="Model Route",
+        zorder=3,
+    )
+    axes[1].plot(
+        seed_grid[:, 0],
+        seed_grid[:, 1],
+        color="#d89133",
+        linewidth=1.1,
+        alpha=0.98,
+        linestyle="-.",
+        label="XY Seed Route",
+        zorder=4,
+    )
+    axes[1].plot(
+        smooth_grid[:, 0],
+        smooth_grid[:, 1],
+        color="#78bf54",
+        linewidth=1.1,
+        solid_capstyle="round",
+        solid_joinstyle="round",
+        label="Smoothed Route",
+        zorder=5,
+        path_effects=smooth_outline,
+    )
+    axes[1].text(
+        0.02,
+        0.98,
+        "(b) Backend Smoother",
+        transform=axes[1].transAxes,
+        ha="left",
+        va="top",
+        fontsize=11,
+        fontweight="semibold",
+        color="#222222",
+    )
+    axes[1].legend(
+        loc="upper center",
+        fontsize=9,
+        framealpha=0.94,
+        ncol=4,
+        facecolor="#fffef9",
+        edgecolor="#c5c2b8",
+    )
+
+    if split_grid:
+        for idx, xg, yg in split_grid:
+            axes[1].scatter(
+                [xg],
+                [yg],
+                s=20,
+                c="#1f4e99",
+                edgecolors="#fffef8",
+                linewidths=0.6,
+                zorder=8,
+            )
+            axes[1].text(
+                xg + 0.35,
+                yg - 0.35,
+                str(idx + 1),
+                fontsize=7,
+                color="#1f4e99",
+                ha="left",
+                va="center",
+                zorder=9,
+                path_effects=[pe.Stroke(linewidth=1.2, foreground="#fffef8"), pe.Normal()],
+            )
+
+    fig.tight_layout(pad=1.0, w_pad=1.4)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=PLOT_DPI, facecolor=fig.get_facecolor(), bbox_inches="tight")
+    fig.savefig(out_path.with_name("offline_demo_paper.png"), dpi=PLOT_DPI, facecolor=fig.get_facecolor(), bbox_inches="tight")
+    fig.savefig(out_path.with_name("offline_demo_paper.pdf"), facecolor=fig.get_facecolor(), bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_split_points_debug(
+    occ: np.ndarray,
+    seed_world_path: Sequence[Tuple[float, float]],
+    smoothed_world_path: Sequence[Tuple[float, float]],
+    split_world_points: Sequence[Tuple[int, float, float]],
+    start_xy: Tuple[int, int],
+    goal_xy: Tuple[int, int],
+    origin_x: float,
+    origin_y: float,
+    resolution: float,
+    out_path: Path,
+) -> None:
+    fig, ax = plt.subplots(1, 1, figsize=(7.2, 6.3), facecolor="#fbfbf8")
+    map_cmap = ListedColormap(["#f2f1ea", "#7b7b7f"])
+    ax.imshow(occ, cmap=map_cmap, origin="upper", interpolation="nearest", vmin=0.0, vmax=1.0)
+    ax.set_aspect("equal")
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.set_facecolor("#f2f1ea")
+    for spine in ax.spines.values():
+        spine.set_linewidth(0.9)
+        spine.set_edgecolor("#9a988f")
+
+    seed_grid = np.asarray(
+        [world_to_grid(x, y, origin_x, origin_y, resolution) for x, y in seed_world_path], dtype=np.float32
+    )
+    smooth_grid = np.asarray(
+        [world_to_grid(x, y, origin_x, origin_y, resolution) for x, y in smoothed_world_path], dtype=np.float32
+    )
+    split_grid = [
+        (idx, *world_to_grid(x, y, origin_x, origin_y, resolution)) for idx, x, y in split_world_points
+    ]
+
+    sx, sy = start_xy
+    gx, gy = goal_xy
+    ax.scatter([sx], [sy], c="#e63b2e", s=60, marker="x", linewidths=1.7, label="Start", zorder=7)
+    ax.scatter([gx], [gy], c="#31c93c", s=42, marker="o", label="Goal", zorder=7)
+    ax.plot(seed_grid[:, 0], seed_grid[:, 1], color="#d9a04c", linewidth=1.0, linestyle="-.", alpha=0.9, label="Seed Route", zorder=4)
+    ax.plot(smooth_grid[:, 0], smooth_grid[:, 1], color="#78bf54", linewidth=1.05, label="Final Route", zorder=5)
+    for idx, xg, yg in split_grid:
+        ax.scatter([xg], [yg], s=24, c="#1f4e99", edgecolors="#fffef8", linewidths=0.8, zorder=8)
+        ax.text(
+            xg + 0.4,
+            yg - 0.4,
+            str(idx + 1),
+            fontsize=7.5,
+            color="#1f4e99",
+            ha="left",
+            va="center",
+            zorder=9,
+            path_effects=[pe.Stroke(linewidth=1.2, foreground="#fffef8"), pe.Normal()],
+        )
+    ax.legend(loc="upper center", fontsize=8.5, framealpha=0.94, ncol=4, facecolor="#fffef9", edgecolor="#c5c2b8")
+    fig.tight_layout(pad=0.8)
+    fig.savefig(out_path, dpi=PLOT_DPI, facecolor=fig.get_facecolor(), bbox_inches="tight")
+    fig.savefig(out_path.with_suffix(".pdf"), facecolor=fig.get_facecolor(), bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_curvature_compare(
+    raw_world_path: Sequence[Tuple[float, float]],
+    seed_world_path: Sequence[Tuple[float, float]],
+    smoothed_world_path: Sequence[Tuple[float, float]],
+    out_path: Path,
+) -> None:
+    fig, ax = plt.subplots(1, 1, figsize=(7.2, 4.3), facecolor="#fbfbf8")
+    ax.set_facecolor("#fbfbf8")
+    for spine in ax.spines.values():
+        spine.set_linewidth(0.9)
+        spine.set_edgecolor("#9a988f")
+    ax.grid(True, color="#d8d5cc", linewidth=0.6, alpha=0.75)
+
+    curve_specs = [
+        ("Model Route", raw_world_path, "#b8b3a1", "--", 1.2),
+        ("Seed Route", seed_world_path, "#d89133", "-.", 1.25),
+        ("Smoothed Route", smoothed_world_path, "#78bf54", "-", 1.35),
+    ]
+    for label, path, color, linestyle, linewidth in curve_specs:
+        s, kappa = curvature_profile(path)
+        if s.size == 0:
+            continue
+        ax.plot(
+            s,
+            kappa,
+            color=color,
+            linestyle=linestyle,
+            linewidth=linewidth,
+            label=label,
+        )
+
+    ax.set_xlabel("s [m]")
+    ax.set_ylabel("kappa [1/m]")
+    ax.legend(
+        loc="upper right",
+        fontsize=9,
+        framealpha=0.94,
+        facecolor="#fffef9",
+        edgecolor="#c5c2b8",
+    )
+    fig.tight_layout(pad=0.8)
+    fig.savefig(out_path, dpi=PLOT_DPI, facecolor=fig.get_facecolor(), bbox_inches="tight")
+    fig.savefig(out_path.with_suffix(".pdf"), facecolor=fig.get_facecolor(), bbox_inches="tight")
+    plt.close(fig)
+
+
+def main() -> int:
+    args = parse_args()
+    if args.plot_only:
+        if args.input_dir is None:
+            raise RuntimeError("--plot-only requires --input-dir")
+        input_dir = args.input_dir
+        meta = json.loads((input_dir / "meta.json").read_text(encoding="utf-8"))
+        occ = load_matrix_csv(input_dir / "occupancy.csv").astype(np.float32)
+        cost_map = load_matrix_csv(input_dir / "guidance_cost.csv").astype(np.float32)
+        raw_world_path = read_xy_path_csv(input_dir / "frontend_raw_path.csv")
+        seed_world_path = read_xy_path_csv(input_dir / "frontend_seed_path.csv")
+        smoothed_world_path = read_xy_path_csv(input_dir / "smoothed_path.csv")
+        split_points_csv = input_dir / "segment_split_points.csv"
+        split_world_points = read_split_points_csv(split_points_csv) if split_points_csv.exists() else []
+        start_xy = tuple(meta["start_xy"])
+        goal_xy = tuple(meta["goal_xy"])
+        origin_x = float(meta["origin_x"])
+        origin_y = float(meta["origin_y"])
+        resolution = float(meta["resolution"])
+        fig_png = input_dir / "offline_demo.png"
+        split_debug_png = input_dir / "offline_demo_split_points.png"
+        curvature_png = input_dir / "curvature_compare.png"
+        plot_case(
+            occ=occ,
+            cost_map=cost_map,
+            raw_world_path=raw_world_path,
+            seed_world_path=seed_world_path,
+            smoothed_world_path=smoothed_world_path,
+            start_xy=start_xy,
+            goal_xy=goal_xy,
+            origin_x=origin_x,
+            origin_y=origin_y,
+            resolution=resolution,
+            out_path=fig_png,
+            split_world_points=split_world_points,
+        )
+        plot_split_points_debug(
+            occ=occ,
+            seed_world_path=seed_world_path,
+            smoothed_world_path=smoothed_world_path,
+            split_world_points=split_world_points,
+            start_xy=start_xy,
+            goal_xy=goal_xy,
+            origin_x=origin_x,
+            origin_y=origin_y,
+            resolution=resolution,
+            out_path=split_debug_png,
+        )
+        plot_curvature_compare(
+            raw_world_path=raw_world_path,
+            seed_world_path=seed_world_path,
+            smoothed_world_path=smoothed_world_path,
+            out_path=curvature_png,
+        )
+        print(f"saved_png={fig_png}")
+        print(f"saved_split_debug_png={split_debug_png}")
+        print(f"saved_curvature_png={curvature_png}")
+        return 0
+
+    rng = random.Random(args.seed)
+    occ, map_index = load_street_occ(args.dataset, args.split, args.map_index, rng)
+    collision_grid_resolution = 0.125
+    start_xy, goal_xy = sample_problem(
+        occ,
+        rng,
+        args.min_start_goal_dist,
+        args.origin_x,
+        args.origin_y,
+        args.resolution,
+        collision_grid_resolution,
+    )
+    astar_8conn, infer_cost_map = _load_python_frontend()
+
+    cost_map = infer_cost_map(
+        ckpt_path=args.ckpt,
+        occ_map_numpy=occ,
+        start_xy=start_xy,
+        goal_xy=goal_xy,
+        start_yaw=0.0,
+        goal_yaw=0.0,
+        device=args.device,
+        invert_guidance_cost=args.invert_guidance_cost,
+    )
+
+    path_xy = astar_8conn(
+        occ_map=occ,
+        start_xy=start_xy,
+        goal_xy=goal_xy,
+        guidance_cost=cost_map,
+        lambda_guidance=args.lambda_guidance,
+        allow_corner_cut=args.allow_corner_cut,
+        heuristic_mode=args.heuristic_mode,
+        heuristic_weight=args.heuristic_weight,
+        guidance_integration_mode=args.guidance_integration_mode,
+        guidance_bonus_threshold=args.guidance_bonus_threshold,
+    )
+    if path_xy is None or len(path_xy) < 2:
+        raise RuntimeError("model-guided A* failed to produce a valid raw path")
+
+    raw_world_path = [
+        grid_to_world(gx, gy, args.origin_x, args.origin_y, args.resolution) for gx, gy in path_xy
+    ]
+    raw_world_path[0] = grid_to_world(start_xy[0], start_xy[1], args.origin_x, args.origin_y, args.resolution)
+    raw_world_path[-1] = grid_to_world(goal_xy[0], goal_xy[1], args.origin_x, args.origin_y, args.resolution)
+
+    out_dir = args.output_dir / args.case_name
+    out_dir.mkdir(parents=True, exist_ok=True)
+    raw_csv = out_dir / "frontend_raw_path.csv"
+    seed_csv = out_dir / "frontend_seed_path.csv"
+    smooth_csv = out_dir / "smoothed_path.csv"
+    split_points_csv = out_dir / "segment_split_points.csv"
+    smooth_yaml = out_dir / "smoother_request.yaml"
+    occupancy_csv = out_dir / "occupancy.csv"
+    guidance_csv = out_dir / "guidance_cost.csv"
+    fig_png = out_dir / "offline_demo.png"
+    split_debug_png = out_dir / "offline_demo_split_points.png"
+    curvature_png = out_dir / "curvature_compare.png"
+    meta_json = out_dir / "meta.json"
+
+    write_raw_path_csv(raw_csv, raw_world_path)
+    write_matrix_csv(occupancy_csv, occ.astype(np.float32))
+    write_matrix_csv(guidance_csv, cost_map.astype(np.float32))
+    write_smoother_yaml(smooth_yaml, occ, raw_world_path, args.origin_x, args.origin_y, args.resolution)
+
+    cmd = [
+        str(args.smoother_cli),
+        "--input-yaml",
+        str(smooth_yaml),
+        "--seed-csv",
+        str(seed_csv),
+        "--split-points-csv",
+        str(split_points_csv),
+        "--output-csv",
+        str(smooth_csv),
+    ]
+    subprocess.run(cmd, check=True)
+    seed_world_path = read_smoothed_path_csv(seed_csv)
+    smoothed_world_path = read_smoothed_path_csv(smooth_csv)
+    split_world_points = read_split_points_csv(split_points_csv)
+
+    plot_case(
+        occ=occ,
+        cost_map=cost_map,
+        raw_world_path=raw_world_path,
+        seed_world_path=seed_world_path,
+        smoothed_world_path=smoothed_world_path,
+        start_xy=start_xy,
+        goal_xy=goal_xy,
+        origin_x=args.origin_x,
+        origin_y=args.origin_y,
+        resolution=args.resolution,
+        out_path=fig_png,
+        split_world_points=split_world_points,
+    )
+    plot_split_points_debug(
+        occ=occ,
+        seed_world_path=seed_world_path,
+        smoothed_world_path=smoothed_world_path,
+        split_world_points=split_world_points,
+        start_xy=start_xy,
+        goal_xy=goal_xy,
+        origin_x=args.origin_x,
+        origin_y=args.origin_y,
+        resolution=args.resolution,
+        out_path=split_debug_png,
+    )
+    plot_curvature_compare(
+        raw_world_path=raw_world_path,
+        seed_world_path=seed_world_path,
+        smoothed_world_path=smoothed_world_path,
+        out_path=curvature_png,
+    )
+
+    meta = {
+        "dataset": str(args.dataset),
+        "split": args.split,
+        "map_index": map_index,
+        "seed": args.seed,
+        "start_xy": list(start_xy),
+        "goal_xy": list(goal_xy),
+        "lambda_guidance": args.lambda_guidance,
+        "heuristic_mode": args.heuristic_mode,
+        "heuristic_weight": args.heuristic_weight,
+        "guidance_integration_mode": args.guidance_integration_mode,
+        "guidance_bonus_threshold": args.guidance_bonus_threshold,
+        "resolution": args.resolution,
+        "collision_grid_resolution": collision_grid_resolution,
+        "origin_x": args.origin_x,
+        "origin_y": args.origin_y,
+        "raw_path_points": len(raw_world_path),
+        "seed_path_points": len(seed_world_path),
+        "smoothed_path_points": len(smoothed_world_path),
+        "segment_split_points": len(split_world_points),
+    }
+    meta_json.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+
+    print(f"saved_png={fig_png}")
+    print(f"saved_raw_csv={raw_csv}")
+    print(f"saved_seed_csv={seed_csv}")
+    print(f"saved_split_points_csv={split_points_csv}")
+    print(f"saved_smoothed_csv={smooth_csv}")
+    print(f"saved_occupancy_csv={occupancy_csv}")
+    print(f"saved_guidance_csv={guidance_csv}")
+    print(f"saved_split_debug_png={split_debug_png}")
+    print(f"saved_curvature_png={curvature_png}")
+    print(f"saved_meta={meta_json}")
+    print(f"map_index={map_index}")
+    print(f"start_xy={start_xy}")
+    print(f"goal_xy={goal_xy}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,27 @@
+{
+    "python.autoComplete.extraPaths": [
+        "/opt/ros/noetic/lib/python3/dist-packages"
+    ],
+    "python.analysis.extraPaths": [
+        "/opt/ros/noetic/lib/python3/dist-packages"
+    ],
+    "files.associations": {
+        "cfloat": "cpp",
+        "iosfwd": "cpp",
+        "deque": "cpp",
+        "string": "cpp",
+        "vector": "cpp",
+        "iostream": "cpp",
+        "cmath": "cpp",
+        "array": "cpp",
+        "bitset": "cpp",
+        "string_view": "cpp",
+        "hash_map": "cpp",
+        "hash_set": "cpp",
+        "initializer_list": "cpp",
+        "utility": "cpp",
+        "ratio": "cpp",
+        "ostream": "cpp"
+    },
+    "cmake.sourceDirectory": "/home/wmd/P2P_fast_try_1205/P2P_fast_try/P2P_fast/src/planning/src/path1/Record_Path"
+}

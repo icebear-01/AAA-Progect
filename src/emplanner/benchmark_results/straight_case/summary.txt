@@ -1,0 +1,11 @@
+scenario_name: straight_case
+dp_source: RL_DP
+qp_running_normally: true
+dp_points: 96
+qp_points: 286
+dp_path_length: 7.187232
+qp_path_length: 5.053776
+dp_mean_abs_kappa: 1.050528
+qp_mean_abs_kappa: 0.282118
+dp_max_abs_kappa: 7.811612
+qp_max_abs_kappa: 1.119535

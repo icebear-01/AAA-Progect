@@ -1,0 +1,2 @@
+/usr/bin/ar qc libdp_infer.a  CMakeFiles/dp_infer.dir/dp_infer.cpp.o
+/usr/bin/ranlib libdp_infer.a
