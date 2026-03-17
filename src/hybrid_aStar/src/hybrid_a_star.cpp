@@ -2053,7 +2053,7 @@ double HybridAStar::CalculateConstraintViolation(const Eigen::VectorXd &points,i
         double y_m = points[2*index+1];
         double y_l = points[2*(index+1)+1];
     double cviolation = curvature_constraint_sqr -
-                        (-2.0 * x_m + x_f + x_l) * (-2.0 * x_m + x_f + x_l) +
+                        (-2.0 * x_m + x_f + x_l) * (-2.0 * x_m + x_f + x_l) -
                         (-2.0 * y_m + y_f + y_l) * (-2.0 * y_m + y_f + y_l);
     max_cviolation = max_cviolation < cviolation ? cviolation : max_cviolation;
     // std::cout<<"cviolation:"<<cviolation<<",max_cviolation:"<<max_cviolation<<" ,.....:"<<(-2.0 * x_m + x_f + x_l) * (-2.0 * x_m + x_f + x_l) +

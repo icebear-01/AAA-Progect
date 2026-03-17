@@ -124,16 +124,17 @@ VectorVec4d BuildPathWithYaw(const std::vector<Vec2d>& xy, const VectorVec4d& re
     return path;
 }
 
-VectorVec4d OptimizeSeedPathXY(const VectorVec4d& raw_path) {
+VectorVec4d OptimizeSeedPathXY(const VectorVec4d& raw_path, double xy_box_half_extent) {
     if (raw_path.size() < 3) {
         return raw_path;
     }
 
     const int n_total = static_cast<int>(raw_path.size());
-    constexpr double x_lb_default = -0.10;
-    constexpr double x_ub_default = 0.10;
-    constexpr double y_lb_default = -0.10;
-    constexpr double y_ub_default = 0.10;
+    const double box_half_extent = std::max(0.0, xy_box_half_extent);
+    const double x_lb_default = -box_half_extent;
+    const double x_ub_default = box_half_extent;
+    const double y_lb_default = -box_half_extent;
+    const double y_ub_default = box_half_extent;
     constexpr double w_smooth = 50000.0;
     constexpr double w_length = 20000.0;
     constexpr double w_ref = 0.1;
@@ -363,6 +364,9 @@ int main(int argc, char** argv) {
         const double steering_change_penalty = ReadDouble(map, "steering_change_penalty", 1.5);
         const double shot_distance = ReadDouble(map, "shot_distance", 5.0);
         const double seed_resample_step = ReadDouble(map, "seed_resample_step", 0.10);
+        const double seed_xy_box_half_extent = ReadDouble(map, "seed_xy_box_half_extent", 0.10);
+        const bool skip_seed_collision_check =
+            map["skip_seed_collision_check"] ? map["skip_seed_collision_check"].as<bool>() : false;
         const bool simplified_collision_check =
             map["simplified_collision_check"] ? map["simplified_collision_check"].as<bool>() : false;
         const bool fix_endpoint_heading =
@@ -423,34 +427,38 @@ int main(int argc, char** argv) {
         }
 
         VectorVec4d raw_path = LoadRawPath(root);
-        VectorVec4d seed_path = OptimizeSeedPathXY(raw_path);
-        if (!PathCollisionFree(
-                occupancy_collision_flat,
-                collision_width,
-                collision_height,
-                collision_grid_resolution,
-                collision_grid_resolution,
-                origin_x,
-                origin_y,
-                seed_path)) {
-            std::cerr << "seed path collides with occupancy, fallback to raw path" << std::endl;
-            seed_path = raw_path;
+        VectorVec4d seed_path = OptimizeSeedPathXY(raw_path, seed_xy_box_half_extent);
+        if (!skip_seed_collision_check) {
+            if (!PathCollisionFree(
+                    occupancy_collision_flat,
+                    collision_width,
+                    collision_height,
+                    collision_grid_resolution,
+                    collision_grid_resolution,
+                    origin_x,
+                    origin_y,
+                    seed_path)) {
+                std::cerr << "seed path collides with occupancy, fallback to raw path" << std::endl;
+                seed_path = raw_path;
+            }
         }
         seed_path = ResamplePathUniform(seed_path, seed_resample_step);
         if (!args.split_points_csv.empty()) {
             WriteSplitPointsCsv(args.split_points_csv, smoother.GetSmoothSegmentSplitPoints(seed_path));
         }
-        if (!PathCollisionFree(
-                occupancy_collision_flat,
-                collision_width,
-                collision_height,
-                collision_grid_resolution,
-                collision_grid_resolution,
-                origin_x,
-                origin_y,
-                seed_path)) {
-            std::cerr << "resampled seed path collides with occupancy, fallback to raw path" << std::endl;
-            seed_path = raw_path;
+        if (!skip_seed_collision_check) {
+            if (!PathCollisionFree(
+                    occupancy_collision_flat,
+                    collision_width,
+                    collision_height,
+                    collision_grid_resolution,
+                    collision_grid_resolution,
+                    origin_x,
+                    origin_y,
+                    seed_path)) {
+                std::cerr << "resampled seed path collides with occupancy, fallback to raw path" << std::endl;
+                seed_path = raw_path;
+            }
         }
         if (!args.seed_csv.empty()) {
             WritePathCsv(args.seed_csv, seed_path);

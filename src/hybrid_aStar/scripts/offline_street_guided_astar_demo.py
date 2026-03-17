@@ -7,6 +7,7 @@ import argparse
 import csv
 import json
 import math
+import os
 import random
 import subprocess
 import sys
@@ -25,8 +26,6 @@ HYBRID_ASTAR_ROOT = SCRIPT_PATH.parent.parent
 REPO_SRC_ROOT = HYBRID_ASTAR_ROOT.parent.parent.parent
 PLOT_DPI = 600
 NEURAL_ASTAR_SRC = HYBRID_ASTAR_ROOT / "model_base_astar" / "neural-astar" / "src"
-if str(NEURAL_ASTAR_SRC) not in sys.path:
-    sys.path.insert(0, str(NEURAL_ASTAR_SRC))
 
 
 def parse_args() -> argparse.Namespace:
@@ -59,9 +58,19 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=REPO_SRC_ROOT.parent / "devel" / "lib" / "hybrid_a_star" / "smooth_path_cli",
     )
+    parser.add_argument(
+        "--neural-astar-src",
+        type=Path,
+        default=NEURAL_ASTAR_SRC,
+    )
     parser.add_argument("--split", choices=["train", "valid", "test"], default="train")
     parser.add_argument("--map-index", type=int, default=-1, help="negative means random index")
     parser.add_argument("--seed", type=int, default=123)
+    parser.add_argument("--start-x", type=int, default=None)
+    parser.add_argument("--start-y", type=int, default=None)
+    parser.add_argument("--goal-x", type=int, default=None)
+    parser.add_argument("--goal-y", type=int, default=None)
+    parser.add_argument("--replay-meta", type=Path, default=None)
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--resolution", type=float, default=0.25)
     parser.add_argument("--origin-x", type=float, default=0.0)
@@ -71,6 +80,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--heuristic-weight", type=float, default=1.0)
     parser.add_argument("--guidance-integration-mode", type=str, default="g_cost")
     parser.add_argument("--guidance-bonus-threshold", type=float, default=0.5)
+    parser.add_argument("--seed-xy-box-half-extent", type=float, default=None)
+    parser.add_argument("--skip-seed-collision-check", action="store_true")
     parser.add_argument("--allow-corner-cut", action="store_true")
     parser.add_argument("--invert-guidance-cost", action="store_true")
     parser.add_argument("--min-start-goal-dist", type=float, default=22.0, help="grid-cell distance")
@@ -85,7 +96,12 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _load_python_frontend():
+def _load_python_frontend(neural_astar_src: Path):
+    neural_astar_src = neural_astar_src.resolve()
+    if not neural_astar_src.exists():
+        raise FileNotFoundError(f"neural-astar src not found: {neural_astar_src}")
+    if str(neural_astar_src) not in sys.path:
+        sys.path.insert(0, str(neural_astar_src))
     from hybrid_astar_guided.grid_astar import astar_8conn  # type: ignore
     from neural_astar.api.guidance_infer import infer_cost_map  # type: ignore
 
@@ -151,6 +167,58 @@ def sample_problem(
             continue
         return start_xy, goal_xy
     raise RuntimeError("failed to sample a solvable start/goal pair")
+
+
+def resolve_problem(
+    occ: np.ndarray,
+    astar_solver,
+    rng: random.Random,
+    min_start_goal_dist: float,
+    origin_x: float,
+    origin_y: float,
+    resolution: float,
+    collision_grid_resolution: float,
+    start_xy: Tuple[int, int] | None,
+    goal_xy: Tuple[int, int] | None,
+) -> Tuple[Tuple[int, int], Tuple[int, int]]:
+    if (start_xy is None) != (goal_xy is None):
+        raise ValueError("start_xy and goal_xy must be provided together")
+    if start_xy is None or goal_xy is None:
+        return sample_problem(
+            occ,
+            rng,
+            min_start_goal_dist,
+            origin_x,
+            origin_y,
+            resolution,
+            collision_grid_resolution,
+        )
+
+    for name, xy in (("start", start_xy), ("goal", goal_xy)):
+        x, y = xy
+        if not (0 <= x < occ.shape[1] and 0 <= y < occ.shape[0]):
+            raise ValueError(f"{name}_xy {xy} out of bounds for map {occ.shape[1]}x{occ.shape[0]}")
+        if occ[y, x] >= 0.5:
+            raise ValueError(f"{name}_xy {xy} is occupied")
+
+    if start_xy == goal_xy:
+        raise ValueError("start_xy and goal_xy must be different")
+    if math.hypot(goal_xy[0] - start_xy[0], goal_xy[1] - start_xy[1]) < min_start_goal_dist:
+        raise ValueError("fixed start/goal distance is below min_start_goal_dist")
+
+    start_world = grid_to_world(start_xy[0], start_xy[1], origin_x, origin_y, resolution)
+    goal_world = grid_to_world(goal_xy[0], goal_xy[1], origin_x, origin_y, resolution)
+    if not footprint16_collision_free_world(
+        occ, start_world[0], start_world[1], origin_x, origin_y, resolution, collision_grid_resolution
+    ):
+        raise ValueError(f"start_xy {start_xy} fails footprint collision check")
+    if not footprint16_collision_free_world(
+        occ, goal_world[0], goal_world[1], origin_x, origin_y, resolution, collision_grid_resolution
+    ):
+        raise ValueError(f"goal_xy {goal_xy} fails footprint collision check")
+    if astar_solver(occ, start_xy, goal_xy) is None:
+        raise ValueError(f"fixed start/goal has no feasible 8-connected path: {start_xy} -> {goal_xy}")
+    return start_xy, goal_xy
 
 
 def grid_to_world(
@@ -405,6 +473,8 @@ def write_smoother_yaml(
     origin_x: float,
     origin_y: float,
     resolution: float,
+    seed_xy_box_half_extent: float,
+    skip_seed_collision_check: bool,
 ) -> None:
     data = {
         "map": {
@@ -425,6 +495,8 @@ def write_smoother_yaml(
             "steering_change_penalty": 1.5,
             "shot_distance": 5.0,
             "seed_resample_step": 0.10,
+            "seed_xy_box_half_extent": float(seed_xy_box_half_extent),
+            "skip_seed_collision_check": bool(skip_seed_collision_check),
             "simplified_collision_check": True,
             "fix_endpoint_heading": False,
             "occupancy": occ.astype(int).tolist(),
@@ -494,6 +566,11 @@ def plot_case(
     smooth_grid = np.asarray(
         [world_to_grid(x, y, origin_x, origin_y, resolution) for x, y in smoothed_world_path], dtype=np.float32
     )
+    seed_overlaps_smooth = (
+        seed_grid.shape == smooth_grid.shape
+        and seed_grid.size > 0
+        and float(np.max(np.linalg.norm(seed_grid - smooth_grid, axis=1))) < 1e-3
+    )
     split_grid = []
     if split_world_points:
         split_grid = [
@@ -548,16 +625,6 @@ def plot_case(
         zorder=3,
     )
     axes[1].plot(
-        seed_grid[:, 0],
-        seed_grid[:, 1],
-        color="#d89133",
-        linewidth=1.1,
-        alpha=0.98,
-        linestyle="-.",
-        label="XY Seed Route",
-        zorder=4,
-    )
-    axes[1].plot(
         smooth_grid[:, 0],
         smooth_grid[:, 1],
         color="#78bf54",
@@ -568,6 +635,34 @@ def plot_case(
         zorder=5,
         path_effects=smooth_outline,
     )
+    if seed_overlaps_smooth:
+        marker_step = max(1, len(seed_grid) // 18)
+        axes[1].plot(
+            seed_grid[:, 0],
+            seed_grid[:, 1],
+            color="#d89133",
+            linewidth=0.0,
+            linestyle="None",
+            marker="o",
+            markersize=3.3,
+            markevery=marker_step,
+            markeredgewidth=0.45,
+            markeredgecolor="#fffef8",
+            alpha=0.96,
+            label="XY Seed Route",
+            zorder=6,
+        )
+    else:
+        axes[1].plot(
+            seed_grid[:, 0],
+            seed_grid[:, 1],
+            color="#d89133",
+            linewidth=1.1,
+            alpha=0.98,
+            linestyle="-.",
+            label="XY Seed Route",
+            zorder=4,
+        )
     axes[1].text(
         0.02,
         0.98,
@@ -683,6 +778,7 @@ def plot_curvature_compare(
     seed_world_path: Sequence[Tuple[float, float]],
     smoothed_world_path: Sequence[Tuple[float, float]],
     out_path: Path,
+    include_raw_path: bool = True,
 ) -> None:
     fig, ax = plt.subplots(1, 1, figsize=(7.2, 4.3), facecolor="#fbfbf8")
     ax.set_facecolor("#fbfbf8")
@@ -692,10 +788,11 @@ def plot_curvature_compare(
     ax.grid(True, color="#d8d5cc", linewidth=0.6, alpha=0.75)
 
     curve_specs = [
-        ("Model Route", raw_world_path, "#b8b3a1", "--", 1.2),
         ("Seed Route", seed_world_path, "#d89133", "-.", 1.25),
         ("Smoothed Route", smoothed_world_path, "#78bf54", "-", 1.35),
     ]
+    if include_raw_path:
+        curve_specs.insert(0, ("Model Route", raw_world_path, "#b8b3a1", "--", 1.2))
     for label, path, color, linestyle, linewidth in curve_specs:
         s, kappa = curvature_profile(path)
         if s.size == 0:
@@ -726,6 +823,28 @@ def plot_curvature_compare(
 
 def main() -> int:
     args = parse_args()
+    if args.replay_meta is not None:
+        replay_meta = json.loads(args.replay_meta.read_text(encoding="utf-8"))
+        args.dataset = Path(replay_meta["dataset"])
+        args.split = replay_meta["split"]
+        args.map_index = int(replay_meta["map_index"])
+        args.seed = int(replay_meta["seed"])
+        args.start_x, args.start_y = map(int, replay_meta["start_xy"])
+        args.goal_x, args.goal_y = map(int, replay_meta["goal_xy"])
+        args.lambda_guidance = float(replay_meta["lambda_guidance"])
+        args.heuristic_mode = replay_meta["heuristic_mode"]
+        args.heuristic_weight = float(replay_meta["heuristic_weight"])
+        args.guidance_integration_mode = replay_meta["guidance_integration_mode"]
+        args.guidance_bonus_threshold = float(replay_meta["guidance_bonus_threshold"])
+        if args.seed_xy_box_half_extent is None:
+            args.seed_xy_box_half_extent = float(replay_meta.get("seed_xy_box_half_extent", 0.10))
+        if not args.skip_seed_collision_check:
+            args.skip_seed_collision_check = bool(replay_meta.get("skip_seed_collision_check", False))
+        args.resolution = float(replay_meta["resolution"])
+        args.origin_x = float(replay_meta["origin_x"])
+        args.origin_y = float(replay_meta["origin_y"])
+    if args.seed_xy_box_half_extent is None:
+        args.seed_xy_box_half_extent = 0.10
     if args.plot_only:
         if args.input_dir is None:
             raise RuntimeError("--plot-only requires --input-dir")
@@ -746,6 +865,7 @@ def main() -> int:
         fig_png = input_dir / "offline_demo.png"
         split_debug_png = input_dir / "offline_demo_split_points.png"
         curvature_png = input_dir / "curvature_compare.png"
+        curvature_seed_smooth_png = input_dir / "curvature_compare_seed_smooth.png"
         plot_case(
             occ=occ,
             cost_map=cost_map,
@@ -778,25 +898,40 @@ def main() -> int:
             smoothed_world_path=smoothed_world_path,
             out_path=curvature_png,
         )
+        plot_curvature_compare(
+            raw_world_path=raw_world_path,
+            seed_world_path=seed_world_path,
+            smoothed_world_path=smoothed_world_path,
+            out_path=curvature_seed_smooth_png,
+            include_raw_path=False,
+        )
         print(f"saved_png={fig_png}")
         print(f"saved_split_debug_png={split_debug_png}")
         print(f"saved_curvature_png={curvature_png}")
+        print(f"saved_curvature_seed_smooth_png={curvature_seed_smooth_png}")
         return 0
 
     rng = random.Random(args.seed)
     occ, map_index = load_street_occ(args.dataset, args.split, args.map_index, rng)
     collision_grid_resolution = 0.125
-    start_xy, goal_xy = sample_problem(
+    astar_8conn, infer_cost_map = _load_python_frontend(args.neural_astar_src)
+    start_xy_opt = None
+    goal_xy_opt = None
+    if None not in (args.start_x, args.start_y, args.goal_x, args.goal_y):
+        start_xy_opt = (args.start_x, args.start_y)
+        goal_xy_opt = (args.goal_x, args.goal_y)
+    start_xy, goal_xy = resolve_problem(
         occ,
+        astar_8conn,
         rng,
         args.min_start_goal_dist,
         args.origin_x,
         args.origin_y,
         args.resolution,
         collision_grid_resolution,
+        start_xy_opt,
+        goal_xy_opt,
     )
-    astar_8conn, infer_cost_map = _load_python_frontend()
-
     cost_map = infer_cost_map(
         ckpt_path=args.ckpt,
         occ_map_numpy=occ,
@@ -841,12 +976,22 @@ def main() -> int:
     fig_png = out_dir / "offline_demo.png"
     split_debug_png = out_dir / "offline_demo_split_points.png"
     curvature_png = out_dir / "curvature_compare.png"
+    curvature_seed_smooth_png = out_dir / "curvature_compare_seed_smooth.png"
     meta_json = out_dir / "meta.json"
 
     write_raw_path_csv(raw_csv, raw_world_path)
     write_matrix_csv(occupancy_csv, occ.astype(np.float32))
     write_matrix_csv(guidance_csv, cost_map.astype(np.float32))
-    write_smoother_yaml(smooth_yaml, occ, raw_world_path, args.origin_x, args.origin_y, args.resolution)
+    write_smoother_yaml(
+        smooth_yaml,
+        occ,
+        raw_world_path,
+        args.origin_x,
+        args.origin_y,
+        args.resolution,
+        args.seed_xy_box_half_extent,
+        args.skip_seed_collision_check,
+    )
 
     cmd = [
         str(args.smoother_cli),
@@ -859,7 +1004,13 @@ def main() -> int:
         "--output-csv",
         str(smooth_csv),
     ]
-    subprocess.run(cmd, check=True)
+    smoother_env = os.environ.copy()
+    smoother_lib_dir = args.smoother_cli.resolve().parents[1]
+    existing_ld = smoother_env.get("LD_LIBRARY_PATH", "")
+    smoother_env["LD_LIBRARY_PATH"] = (
+        f"{smoother_lib_dir}:{existing_ld}" if existing_ld else str(smoother_lib_dir)
+    )
+    subprocess.run(cmd, check=True, env=smoother_env)
     seed_world_path = read_smoothed_path_csv(seed_csv)
     smoothed_world_path = read_smoothed_path_csv(smooth_csv)
     split_world_points = read_split_points_csv(split_points_csv)
@@ -896,6 +1047,13 @@ def main() -> int:
         smoothed_world_path=smoothed_world_path,
         out_path=curvature_png,
     )
+    plot_curvature_compare(
+        raw_world_path=raw_world_path,
+        seed_world_path=seed_world_path,
+        smoothed_world_path=smoothed_world_path,
+        out_path=curvature_seed_smooth_png,
+        include_raw_path=False,
+    )
 
     meta = {
         "dataset": str(args.dataset),
@@ -909,6 +1067,8 @@ def main() -> int:
         "heuristic_weight": args.heuristic_weight,
         "guidance_integration_mode": args.guidance_integration_mode,
         "guidance_bonus_threshold": args.guidance_bonus_threshold,
+        "seed_xy_box_half_extent": args.seed_xy_box_half_extent,
+        "skip_seed_collision_check": args.skip_seed_collision_check,
         "resolution": args.resolution,
         "collision_grid_resolution": collision_grid_resolution,
         "origin_x": args.origin_x,
@@ -929,6 +1089,7 @@ def main() -> int:
     print(f"saved_guidance_csv={guidance_csv}")
     print(f"saved_split_debug_png={split_debug_png}")
     print(f"saved_curvature_png={curvature_png}")
+    print(f"saved_curvature_seed_smooth_png={curvature_seed_smooth_png}")
     print(f"saved_meta={meta_json}")
     print(f"map_index={map_index}")
     print(f"start_xy={start_xy}")
