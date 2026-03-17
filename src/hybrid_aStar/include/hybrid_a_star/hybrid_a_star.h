@@ -166,13 +166,13 @@ private:
     double steering_change_penalty_;     //2
 
     double path_length_ = 0.0;
-    const float curvature_constraint_=0.5;  //最大曲率限制  大约R=2m
+    const float curvature_constraint_=1.0;  //最大曲率限制
 
     // Settings of sqp
     int sqp_pen_max_iter_ = 100;    //100
     double sqp_ftol_ = 1e-2;  //0.01
     int sqp_sub_max_iter_ = 100;  //100
-    double sqp_ctol_ = 5e-3;    //0.01
+    double sqp_ctol_ = 1e-6;    // curvature constraint violation tolerance
 
     std::shared_ptr<RSPath> rs_path_ptr_;
 

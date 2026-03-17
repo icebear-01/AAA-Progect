@@ -4,9 +4,12 @@
 #include "hybrid_a_star/trajectory_optimizer.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <set>
+#include <string>
 
 namespace {
 
@@ -1401,9 +1404,9 @@ VectorVec4d HybridAStar::Smooth(VectorVec4d &path)
                 // std::cout<<"SQP结束"<<std::endl;
                 // std::cout<<"qpsolution:"<<QPSolution<<std::endl;
                 float ctol = CalculateConstraintViolation(QPSolution,PathPointsNum,curvature_constraint_sqr);
-                if (ctol<sqp_ctol_&&QPSolution(0)<10000)  //这里是防止出现无解的情况
+                if (ctol <= sqp_ctol_ && QPSolution(0)<10000)  //这里是防止出现无解的情况
                 {
-                    std::cout<<"符合曲率约束！ctol:"<<ctol<<std::endl;
+                    std::cout<<"符合曲率约束！max_violation:"<<ctol<<std::endl;
                     // std::cout<<"num_of_variables_:"<<num_of_variables_<<" num_of_constraints_ :"<<num_of_constraints_<<" points_num:"<< PathPointsNum<<" QPSolution_size:"<<QPSolution.size()<<"lb ub_size:"<<lb.size()<<","<<ub.size()<<std::endl;
                     // std::cout<<"QPSolution:"<<QPSolution<<std::endl;
                     
@@ -1411,7 +1414,7 @@ VectorVec4d HybridAStar::Smooth(VectorVec4d &path)
                 }
                 else
                 {
-                    std::cout<<"不满足曲率约束！ctol:"<<ctol<<std::endl;
+                    std::cout<<"不满足曲率约束！max_violation:"<<ctol<<std::endl;
                 }
                 pen_itr++;w_slack=w_slack*10;
             }
@@ -1938,10 +1941,14 @@ std::vector<int> HybridAStar::FindGeometrySplitIndices(const VectorVec4d& path) 
     GetPathYaw(yaw_path);
 
     const double heading_split_thresh = 30.0 * M_PI / 180.0;
-    const double cumulative_heading_split_thresh = 45.0 * M_PI / 180.0;
-    const double narrow_clearance_thresh = std::max(0.8, 4.0 * MAP_GRID_RESOLUTION_);
+    const double cumulative_heading_split_thresh = 60.0 * M_PI / 180.0;
+    const double narrow_enter_clearance_thresh = std::max(0.7, 5.0 * MAP_GRID_RESOLUTION_);
+    const double narrow_exit_clearance_thresh = std::max(0.9, 7.0 * MAP_GRID_RESOLUTION_);
     const double max_clearance_probe = std::max(1.5, 8.0 * MAP_GRID_RESOLUTION_);
     const int min_segment_points = std::max(8, static_cast<int>(std::ceil(1.0 / MAP_GRID_RESOLUTION_)));
+    const int narrow_min_run_points =
+        std::max(4, static_cast<int>(std::ceil(0.5 / std::max(0.1, MAP_GRID_RESOLUTION_))));
+    const bool debug_splits = std::getenv("HYBRID_ASTAR_DEBUG_SPLITS") != nullptr;
 
     std::vector<double> heading_delta(n, 0.0);
     std::vector<double> clearances(n, max_clearance_probe);
@@ -1953,9 +1960,16 @@ std::vector<int> HybridAStar::FindGeometrySplitIndices(const VectorVec4d& path) 
     }
 
     std::set<int> candidates;
+    std::map<int, std::vector<std::string>> candidate_reasons;
+    auto add_candidate = [&](int idx, const std::string& reason) {
+        candidates.insert(idx);
+        if (debug_splits) {
+            candidate_reasons[idx].push_back(reason);
+        }
+    };
     for (int i = 2; i < n - 2; ++i) {
         if (std::abs(heading_delta[i]) >= heading_split_thresh) {
-            candidates.insert(i);
+            add_candidate(i, "single_heading");
         }
     }
 
@@ -1967,26 +1981,47 @@ std::vector<int> HybridAStar::FindGeometrySplitIndices(const VectorVec4d& path) 
         const double yaw_from_anchor =
             NormalizeAngleDiff(yaw_path[i].z() - yaw_path[last_heading_anchor].z());
         if (std::abs(yaw_from_anchor) >= cumulative_heading_split_thresh) {
-            candidates.insert(i);
+            add_candidate(i, "cumulative_heading");
             last_heading_anchor = i;
         }
     }
 
     bool in_narrow = false;
     int narrow_start = -1;
+    int narrow_enter_run = 0;
+    int narrow_exit_run = 0;
     for (int i = 1; i < n - 1; ++i) {
-        const bool is_narrow = clearances[i] <= narrow_clearance_thresh;
-        if (!in_narrow && is_narrow) {
-            in_narrow = true;
-            narrow_start = i;
-            candidates.insert(std::max(1, i - 1));
-        } else if (in_narrow && !is_narrow) {
-            in_narrow = false;
-            candidates.insert(std::min(n - 2, i));
+        if (!in_narrow) {
+            if (clearances[i] <= narrow_enter_clearance_thresh) {
+                if (narrow_enter_run == 0) {
+                    narrow_start = i;
+                }
+                ++narrow_enter_run;
+                if (narrow_enter_run >= narrow_min_run_points) {
+                    in_narrow = true;
+                    narrow_exit_run = 0;
+                    add_candidate(std::max(1, narrow_start - 1), "narrow_enter");
+                }
+            } else {
+                narrow_enter_run = 0;
+                narrow_start = -1;
+            }
+        } else if (clearances[i] >= narrow_exit_clearance_thresh) {
+            ++narrow_exit_run;
+            if (narrow_exit_run >= narrow_min_run_points) {
+                in_narrow = false;
+                const int exit_idx = std::max(1, i - narrow_exit_run + 1);
+                add_candidate(std::min(n - 2, exit_idx), "narrow_exit");
+                narrow_enter_run = 0;
+                narrow_exit_run = 0;
+                narrow_start = -1;
+            }
+        } else {
+            narrow_exit_run = 0;
         }
     }
     if (in_narrow && narrow_start >= 0) {
-        candidates.insert(std::min(n - 2, n - 2));
+        add_candidate(std::min(n - 2, n - 2), "narrow_trailing_end");
     }
 
     std::vector<int> sorted_candidates(candidates.begin(), candidates.end());
@@ -2003,6 +2038,33 @@ std::vector<int> HybridAStar::FindGeometrySplitIndices(const VectorVec4d& path) 
     }
     if (!filtered.empty() && n - filtered.back() < min_segment_points) {
         filtered.pop_back();
+    }
+    if (debug_splits) {
+        std::cout << "[split-debug] n=" << n
+                  << " heading_deg=30 cumulative_deg=60 narrow_enter=" << narrow_enter_clearance_thresh
+                  << " narrow_exit=" << narrow_exit_clearance_thresh
+                  << " narrow_run=" << narrow_min_run_points
+                  << " min_segment_points=" << min_segment_points << std::endl;
+        for (const int idx : filtered) {
+            std::cout << "[split-debug] keep idx=" << idx
+                      << " xy=(" << yaw_path[idx].x() << "," << yaw_path[idx].y() << ")"
+                      << " yaw_deg=" << yaw_path[idx].z() * 180.0 / M_PI
+                      << " clearance=" << clearances[idx]
+                      << " heading_delta_deg=" << heading_delta[idx] * 180.0 / M_PI
+                      << " reasons=";
+            const auto it = candidate_reasons.find(idx);
+            if (it == candidate_reasons.end() || it->second.empty()) {
+                std::cout << "unknown";
+            } else {
+                for (std::size_t reason_idx = 0; reason_idx < it->second.size(); ++reason_idx) {
+                    if (reason_idx > 0) {
+                        std::cout << ",";
+                    }
+                    std::cout << it->second[reason_idx];
+                }
+            }
+            std::cout << std::endl;
+        }
     }
     return filtered;
 }
@@ -2044,7 +2106,7 @@ std::vector<VectorVec4d> HybridAStar::SplitSegmentByGeometry(const VectorVec4d& 
 //求解限制最大曲率约束限制系数
 double HybridAStar::CalculateConstraintViolation(const Eigen::VectorXd &points,int PathPointsNum,double curvature_constraint_sqr) {
 
-  double max_cviolation = std::numeric_limits<double>::min();
+  double max_cviolation = 0.0;
   for (int index = 3; index < PathPointsNum-3; index++) {  //TODO：因为前三个点是固定的  //可能会有BUG？待验证 //down
         double x_f = points[2*(index-1)];
         double x_m = points[2*index];
@@ -2052,12 +2114,12 @@ double HybridAStar::CalculateConstraintViolation(const Eigen::VectorXd &points,i
         double y_f = points[2*(index-1)+1];
         double y_m = points[2*index+1];
         double y_l = points[2*(index+1)+1];
-    double cviolation = curvature_constraint_sqr -
-                        (-2.0 * x_m + x_f + x_l) * (-2.0 * x_m + x_f + x_l) -
+    const double curvature_actual =
+                        (-2.0 * x_m + x_f + x_l) * (-2.0 * x_m + x_f + x_l) +
                         (-2.0 * y_m + y_f + y_l) * (-2.0 * y_m + y_f + y_l);
-    max_cviolation = max_cviolation < cviolation ? cviolation : max_cviolation;
-    // std::cout<<"cviolation:"<<cviolation<<",max_cviolation:"<<max_cviolation<<" ,.....:"<<(-2.0 * x_m + x_f + x_l) * (-2.0 * x_m + x_f + x_l) +
-                        // (-2.0 * y_m + y_f + y_l) * (-2.0 * y_m + y_f + y_l)<<std::endl;
+    const double cviolation = curvature_actual - curvature_constraint_sqr;
+    max_cviolation = std::max(max_cviolation, cviolation);
+    // std::cout<<"cviolation:"<<cviolation<<",max_cviolation:"<<max_cviolation<<" ,.....:"<<curvature_actual<<std::endl;
   }
   std::cout<<"curvature_constraint_sqr:"<<curvature_constraint_sqr<<std::endl;
   return max_cviolation;
