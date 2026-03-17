@@ -1126,7 +1126,7 @@ VectorVec4d HybridAStar::Smooth(VectorVec4d &path)
             Eigen::VectorXd ub = Eigen::VectorXd::Zero(num_of_constraints_);
 
             int pen_itr = 0;
-            double w_slack=5e4;
+            double w_slack=5e3;
             int sqp_num=0;
             while (pen_itr<sqp_pen_max_iter_)
             {
@@ -1942,8 +1942,7 @@ std::vector<int> HybridAStar::FindGeometrySplitIndices(const VectorVec4d& path) 
 
     const double heading_split_thresh = 30.0 * M_PI / 180.0;
     const double cumulative_heading_split_thresh = 60.0 * M_PI / 180.0;
-    const double narrow_enter_clearance_thresh = std::max(0.7, 5.0 * MAP_GRID_RESOLUTION_);
-    const double narrow_exit_clearance_thresh = std::max(0.9, 7.0 * MAP_GRID_RESOLUTION_);
+    const double narrow_enter_clearance_thresh = 1.0;
     const double max_clearance_probe = std::max(1.5, 8.0 * MAP_GRID_RESOLUTION_);
     const int min_segment_points = std::max(8, static_cast<int>(std::ceil(1.0 / MAP_GRID_RESOLUTION_)));
     const int narrow_min_run_points =
@@ -1989,7 +1988,7 @@ std::vector<int> HybridAStar::FindGeometrySplitIndices(const VectorVec4d& path) 
     bool in_narrow = false;
     int narrow_start = -1;
     int narrow_enter_run = 0;
-    int narrow_exit_run = 0;
+    int narrow_clear_run = 0;
     for (int i = 1; i < n - 1; ++i) {
         if (!in_narrow) {
             if (clearances[i] <= narrow_enter_clearance_thresh) {
@@ -1999,29 +1998,24 @@ std::vector<int> HybridAStar::FindGeometrySplitIndices(const VectorVec4d& path) 
                 ++narrow_enter_run;
                 if (narrow_enter_run >= narrow_min_run_points) {
                     in_narrow = true;
-                    narrow_exit_run = 0;
+                    narrow_clear_run = 0;
                     add_candidate(std::max(1, narrow_start - 1), "narrow_enter");
                 }
             } else {
                 narrow_enter_run = 0;
                 narrow_start = -1;
             }
-        } else if (clearances[i] >= narrow_exit_clearance_thresh) {
-            ++narrow_exit_run;
-            if (narrow_exit_run >= narrow_min_run_points) {
+        } else if (clearances[i] > narrow_enter_clearance_thresh) {
+            ++narrow_clear_run;
+            if (narrow_clear_run >= narrow_min_run_points) {
                 in_narrow = false;
-                const int exit_idx = std::max(1, i - narrow_exit_run + 1);
-                add_candidate(std::min(n - 2, exit_idx), "narrow_exit");
                 narrow_enter_run = 0;
-                narrow_exit_run = 0;
+                narrow_clear_run = 0;
                 narrow_start = -1;
             }
         } else {
-            narrow_exit_run = 0;
+            narrow_clear_run = 0;
         }
-    }
-    if (in_narrow && narrow_start >= 0) {
-        add_candidate(std::min(n - 2, n - 2), "narrow_trailing_end");
     }
 
     std::vector<int> sorted_candidates(candidates.begin(), candidates.end());
@@ -2042,7 +2036,6 @@ std::vector<int> HybridAStar::FindGeometrySplitIndices(const VectorVec4d& path) 
     if (debug_splits) {
         std::cout << "[split-debug] n=" << n
                   << " heading_deg=30 cumulative_deg=60 narrow_enter=" << narrow_enter_clearance_thresh
-                  << " narrow_exit=" << narrow_exit_clearance_thresh
                   << " narrow_run=" << narrow_min_run_points
                   << " min_segment_points=" << min_segment_points << std::endl;
         for (const int idx : filtered) {
