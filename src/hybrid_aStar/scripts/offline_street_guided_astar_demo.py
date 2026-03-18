@@ -12,7 +12,7 @@ import random
 import subprocess
 import sys
 from pathlib import Path
-from typing import Iterable, List, Sequence, Tuple
+from typing import Iterable, List, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -26,6 +26,8 @@ HYBRID_ASTAR_ROOT = SCRIPT_PATH.parent.parent
 REPO_SRC_ROOT = HYBRID_ASTAR_ROOT.parent.parent.parent
 PLOT_DPI = 600
 NEURAL_ASTAR_SRC = HYBRID_ASTAR_ROOT / "model_base_astar" / "neural-astar" / "src"
+PathRecord = Tuple[float, float, Optional[int]]
+ShiftPoint = Tuple[int, float, float, int, int]
 
 
 def parse_args() -> argparse.Namespace:
@@ -178,8 +180,8 @@ def resolve_problem(
     origin_y: float,
     resolution: float,
     collision_grid_resolution: float,
-    start_xy: Tuple[int, int] | None,
-    goal_xy: Tuple[int, int] | None,
+    start_xy: Optional[Tuple[int, int]],
+    goal_xy: Optional[Tuple[int, int]],
 ) -> Tuple[Tuple[int, int], Tuple[int, int]]:
     if (start_xy is None) != (goal_xy is None):
         raise ValueError("start_xy and goal_xy must be provided together")
@@ -413,6 +415,74 @@ def curvature_profile(path: Sequence[Tuple[float, float]], step: float = 0.10) -
     return s, kappa
 
 
+def backend_code_curvature_profile(path: Sequence[Tuple[float, float]]) -> Tuple[np.ndarray, np.ndarray]:
+    if len(path) < 3:
+        return np.zeros((0,), dtype=np.float64), np.zeros((0,), dtype=np.float64)
+    points = np.asarray(path, dtype=np.float64)
+    s = cumulative_arc_length(path)
+    total_length = float(s[-1])
+    average_interval_length = total_length / max(1, len(path) - 1)
+    if average_interval_length <= 1e-9:
+        return np.zeros((0,), dtype=np.float64), np.zeros((0,), dtype=np.float64)
+    second_diff_x = points[:-2, 0] - 2.0 * points[1:-1, 0] + points[2:, 0]
+    second_diff_y = points[:-2, 1] - 2.0 * points[1:-1, 1] + points[2:, 1]
+    curvature_mag = np.sqrt(second_diff_x * second_diff_x + second_diff_y * second_diff_y) / (
+        average_interval_length * average_interval_length
+    )
+    return s[1:-1], curvature_mag
+
+
+def split_point_arc_lengths(
+    seed_world_path: Sequence[Tuple[float, float]],
+    split_world_points: Sequence[Tuple[int, float, float]],
+) -> List[Tuple[int, float]]:
+    if not split_world_points:
+        return []
+    seed_s = cumulative_arc_length(seed_world_path)
+    seed_xy = np.asarray(seed_world_path, dtype=np.float64)
+    positions: List[Tuple[int, float]] = []
+    for order, (split_index, x, y) in enumerate(split_world_points, start=1):
+        deltas = seed_xy - np.asarray([x, y], dtype=np.float64)
+        nearest_index = int(np.argmin(np.sum(deltas * deltas, axis=1)))
+        if 0 <= split_index < len(seed_s):
+            direct_match_error = float(np.linalg.norm(seed_xy[split_index] - np.asarray([x, y], dtype=np.float64)))
+            if direct_match_error <= 1e-4:
+                nearest_index = split_index
+        positions.append((order, float(seed_s[nearest_index])))
+    return positions
+
+
+def annotate_split_points_on_curvature(
+    ax: plt.Axes,
+    seed_world_path: Sequence[Tuple[float, float]],
+    split_world_points: Optional[Sequence[Tuple[int, float, float]]],
+) -> None:
+    if not split_world_points:
+        return
+    for order, split_s in split_point_arc_lengths(seed_world_path, split_world_points):
+        ax.axvline(
+            split_s,
+            color="#1f4e99",
+            linewidth=0.9,
+            linestyle=":",
+            alpha=0.72,
+            zorder=1,
+        )
+        ax.annotate(
+            "P{}".format(order),
+            xy=(split_s, 0.98),
+            xycoords=("data", "axes fraction"),
+            xytext=(3, -1),
+            textcoords="offset points",
+            ha="left",
+            va="top",
+            fontsize=7.3,
+            color="#1f4e99",
+            bbox={"boxstyle": "round,pad=0.16", "facecolor": "#f4f8ff", "edgecolor": "#c4d2ea", "alpha": 0.92},
+            zorder=5,
+        )
+
+
 def preprocess_seed_path(
     occ: np.ndarray,
     raw_world_path: Sequence[Tuple[float, float]],
@@ -442,19 +512,100 @@ def write_raw_path_csv(path: Path, world_path: Sequence[Tuple[float, float]]) ->
             writer.writerow([f"{x:.6f}", f"{y:.6f}"])
 
 
-def read_xy_path_csv(path: Path) -> List[Tuple[float, float]]:
-    points: List[Tuple[float, float]] = []
+def read_path_records_csv(path: Path) -> List[PathRecord]:
+    records: List[PathRecord] = []
     with path.open("r", newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
         for row in reader:
-            points.append((float(row["x"]), float(row["y"])))
-    if len(points) < 2:
+            direction: Optional[int] = None
+            if "dir" in row and row["dir"] not in (None, ""):
+                direction = int(float(row["dir"]))
+            records.append((float(row["x"]), float(row["y"]), direction))
+    if len(records) < 2:
         raise RuntimeError(f"path csv is empty: {path}")
+    return records
+
+
+def read_xy_path_csv(path: Path) -> List[Tuple[float, float]]:
+    points = [(x, y) for x, y, _ in read_path_records_csv(path)]
     return points
 
 
 def read_smoothed_path_csv(path: Path) -> List[Tuple[float, float]]:
     return read_xy_path_csv(path)
+
+
+def extract_gear_shift_points(path_records: Sequence[PathRecord]) -> List[ShiftPoint]:
+    shift_points: List[ShiftPoint] = []
+    for index in range(1, len(path_records)):
+        _, _, prev_dir = path_records[index - 1]
+        x, y, curr_dir = path_records[index]
+        if prev_dir is None or curr_dir is None or prev_dir == curr_dir:
+            continue
+        shift_points.append((index, x, y, prev_dir, curr_dir))
+    return shift_points
+
+
+def format_direction_label(direction: int) -> str:
+    if direction > 0:
+        return "F"
+    if direction < 0:
+        return "R"
+    return str(direction)
+
+
+def annotate_gear_shifts(
+    ax: plt.Axes,
+    shift_world_points: Optional[Sequence[ShiftPoint]],
+    origin_x: float,
+    origin_y: float,
+    resolution: float,
+) -> None:
+    shift_grid = []
+    if shift_world_points:
+        shift_grid = [
+            (point_index, *world_to_grid(x, y, origin_x, origin_y, resolution), prev_dir, curr_dir)
+            for point_index, x, y, prev_dir, curr_dir in shift_world_points
+        ]
+
+    if not shift_grid:
+        ax.text(
+            0.02,
+            0.06,
+            "No gear shifts",
+            transform=ax.transAxes,
+            ha="left",
+            va="bottom",
+            fontsize=8.2,
+            color="#7d4d4d",
+            bbox={"boxstyle": "round,pad=0.22", "facecolor": "#fff5f1", "edgecolor": "#d4b7af", "alpha": 0.9},
+            zorder=10,
+        )
+        return
+
+    for order, (point_index, xg, yg, prev_dir, curr_dir) in enumerate(shift_grid, start=1):
+        ax.scatter(
+            [xg],
+            [yg],
+            s=34,
+            marker="s",
+            c="#b34747",
+            edgecolors="#fffef8",
+            linewidths=0.8,
+            zorder=10,
+            label="Gear Shift" if order == 1 else None,
+        )
+        ax.text(
+            xg + 0.42,
+            yg + 0.35,
+            f"S{order} {format_direction_label(prev_dir)}->{format_direction_label(curr_dir)}",
+            fontsize=7.0,
+            color="#8c2f2f",
+            ha="left",
+            va="bottom",
+            zorder=11,
+            path_effects=[pe.Stroke(linewidth=1.2, foreground="#fffef8"), pe.Normal()],
+        )
 
 
 def read_split_points_csv(path: Path) -> List[Tuple[int, float, float]]:
@@ -530,7 +681,8 @@ def plot_case(
     origin_y: float,
     resolution: float,
     out_path: Path,
-    split_world_points: Sequence[Tuple[int, float, float]] | None = None,
+    split_world_points: Optional[Sequence[Tuple[int, float, float]]] = None,
+    shift_world_points: Optional[Sequence[ShiftPoint]] = None,
 ) -> None:
     fig, axes = plt.subplots(1, 2, figsize=(12.2, 5.6), facecolor="#fbfbf8")
     map_cmap = ListedColormap(["#f2f1ea", "#7b7b7f"])
@@ -674,15 +826,6 @@ def plot_case(
         fontweight="semibold",
         color="#222222",
     )
-    axes[1].legend(
-        loc="upper center",
-        fontsize=9,
-        framealpha=0.94,
-        ncol=4,
-        facecolor="#fffef9",
-        edgecolor="#c5c2b8",
-    )
-
     if split_grid:
         for idx, xg, yg in split_grid:
             axes[1].scatter(
@@ -705,6 +848,15 @@ def plot_case(
                 zorder=9,
                 path_effects=[pe.Stroke(linewidth=1.2, foreground="#fffef8"), pe.Normal()],
             )
+    annotate_gear_shifts(axes[1], shift_world_points, origin_x, origin_y, resolution)
+    axes[1].legend(
+        loc="upper center",
+        fontsize=9,
+        framealpha=0.94,
+        ncol=5,
+        facecolor="#fffef9",
+        edgecolor="#c5c2b8",
+    )
 
     fig.tight_layout(pad=1.0, w_pad=1.4)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -725,6 +877,7 @@ def plot_split_points_debug(
     origin_y: float,
     resolution: float,
     out_path: Path,
+    shift_world_points: Optional[Sequence[ShiftPoint]] = None,
 ) -> None:
     fig, ax = plt.subplots(1, 1, figsize=(7.2, 6.3), facecolor="#fbfbf8")
     map_cmap = ListedColormap(["#f2f1ea", "#7b7b7f"])
@@ -766,6 +919,7 @@ def plot_split_points_debug(
             zorder=9,
             path_effects=[pe.Stroke(linewidth=1.2, foreground="#fffef8"), pe.Normal()],
         )
+    annotate_gear_shifts(ax, shift_world_points, origin_x, origin_y, resolution)
     ax.legend(loc="upper center", fontsize=8.5, framealpha=0.94, ncol=4, facecolor="#fffef9", edgecolor="#c5c2b8")
     fig.tight_layout(pad=0.8)
     fig.savefig(out_path, dpi=PLOT_DPI, facecolor=fig.get_facecolor(), bbox_inches="tight")
@@ -779,6 +933,7 @@ def plot_curvature_compare(
     smoothed_world_path: Sequence[Tuple[float, float]],
     out_path: Path,
     include_raw_path: bool = True,
+    split_world_points: Optional[Sequence[Tuple[int, float, float]]] = None,
 ) -> None:
     fig, ax = plt.subplots(1, 1, figsize=(7.2, 4.3), facecolor="#fbfbf8")
     ax.set_facecolor("#fbfbf8")
@@ -786,6 +941,24 @@ def plot_curvature_compare(
         spine.set_linewidth(0.9)
         spine.set_edgecolor("#9a988f")
     ax.grid(True, color="#d8d5cc", linewidth=0.6, alpha=0.75)
+    ax.axhline(
+        1.0,
+        color="#b34747",
+        linewidth=0.95,
+        linestyle=":",
+        alpha=0.9,
+        zorder=1,
+        label="kappa = 1.0",
+    )
+    ax.axhline(
+        -1.0,
+        color="#b34747",
+        linewidth=0.95,
+        linestyle=":",
+        alpha=0.9,
+        zorder=1,
+        label="kappa = -1.0",
+    )
 
     curve_specs = [
         ("Seed Route", seed_world_path, "#d89133", "-.", 1.25),
@@ -805,9 +978,70 @@ def plot_curvature_compare(
             linewidth=linewidth,
             label=label,
         )
+    annotate_split_points_on_curvature(ax, seed_world_path, split_world_points)
 
     ax.set_xlabel("s [m]")
     ax.set_ylabel("kappa [1/m]")
+    ax.legend(
+        loc="upper right",
+        fontsize=9,
+        framealpha=0.94,
+        facecolor="#fffef9",
+        edgecolor="#c5c2b8",
+    )
+    fig.tight_layout(pad=0.8)
+    fig.savefig(out_path, dpi=PLOT_DPI, facecolor=fig.get_facecolor(), bbox_inches="tight")
+    fig.savefig(out_path.with_suffix(".pdf"), facecolor=fig.get_facecolor(), bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_backend_code_curvature_compare(
+    raw_world_path: Sequence[Tuple[float, float]],
+    seed_world_path: Sequence[Tuple[float, float]],
+    smoothed_world_path: Sequence[Tuple[float, float]],
+    out_path: Path,
+    include_raw_path: bool = True,
+    split_world_points: Optional[Sequence[Tuple[int, float, float]]] = None,
+    curvature_limit: float = 1.0,
+) -> None:
+    fig, ax = plt.subplots(1, 1, figsize=(7.2, 4.3), facecolor="#fbfbf8")
+    ax.set_facecolor("#fbfbf8")
+    for spine in ax.spines.values():
+        spine.set_linewidth(0.9)
+        spine.set_edgecolor("#9a988f")
+    ax.grid(True, color="#d8d5cc", linewidth=0.6, alpha=0.75)
+    ax.axhline(
+        curvature_limit,
+        color="#b34747",
+        linewidth=0.95,
+        linestyle=":",
+        alpha=0.9,
+        zorder=1,
+        label="backend kappa limit = {:.1f}".format(curvature_limit),
+    )
+
+    curve_specs = [
+        ("Seed Route", seed_world_path, "#d89133", "-.", 1.25),
+        ("Smoothed Route", smoothed_world_path, "#78bf54", "-", 1.35),
+    ]
+    if include_raw_path:
+        curve_specs.insert(0, ("Model Route", raw_world_path, "#b8b3a1", "--", 1.2))
+    for label, path, color, linestyle, linewidth in curve_specs:
+        s, kappa = backend_code_curvature_profile(path)
+        if s.size == 0:
+            continue
+        ax.plot(
+            s,
+            kappa,
+            color=color,
+            linestyle=linestyle,
+            linewidth=linewidth,
+            label=label,
+        )
+
+    annotate_split_points_on_curvature(ax, seed_world_path, split_world_points)
+    ax.set_xlabel("s [m]")
+    ax.set_ylabel("backend approx |kappa| [1/m]")
     ax.legend(
         loc="upper right",
         fontsize=9,
@@ -853,8 +1087,11 @@ def main() -> int:
         occ = load_matrix_csv(input_dir / "occupancy.csv").astype(np.float32)
         cost_map = load_matrix_csv(input_dir / "guidance_cost.csv").astype(np.float32)
         raw_world_path = read_xy_path_csv(input_dir / "frontend_raw_path.csv")
-        seed_world_path = read_xy_path_csv(input_dir / "frontend_seed_path.csv")
-        smoothed_world_path = read_xy_path_csv(input_dir / "smoothed_path.csv")
+        seed_records = read_path_records_csv(input_dir / "frontend_seed_path.csv")
+        smoothed_records = read_path_records_csv(input_dir / "smoothed_path.csv")
+        seed_world_path = [(x, y) for x, y, _ in seed_records]
+        smoothed_world_path = [(x, y) for x, y, _ in smoothed_records]
+        shift_world_points = extract_gear_shift_points(smoothed_records)
         split_points_csv = input_dir / "segment_split_points.csv"
         split_world_points = read_split_points_csv(split_points_csv) if split_points_csv.exists() else []
         start_xy = tuple(meta["start_xy"])
@@ -866,6 +1103,8 @@ def main() -> int:
         split_debug_png = input_dir / "offline_demo_split_points.png"
         curvature_png = input_dir / "curvature_compare.png"
         curvature_seed_smooth_png = input_dir / "curvature_compare_seed_smooth.png"
+        curvature_backend_png = input_dir / "curvature_compare_backend_code.png"
+        curvature_backend_seed_smooth_png = input_dir / "curvature_compare_backend_code_seed_smooth.png"
         plot_case(
             occ=occ,
             cost_map=cost_map,
@@ -879,6 +1118,7 @@ def main() -> int:
             resolution=resolution,
             out_path=fig_png,
             split_world_points=split_world_points,
+            shift_world_points=shift_world_points,
         )
         plot_split_points_debug(
             occ=occ,
@@ -891,12 +1131,14 @@ def main() -> int:
             origin_y=origin_y,
             resolution=resolution,
             out_path=split_debug_png,
+            shift_world_points=shift_world_points,
         )
         plot_curvature_compare(
             raw_world_path=raw_world_path,
             seed_world_path=seed_world_path,
             smoothed_world_path=smoothed_world_path,
             out_path=curvature_png,
+            split_world_points=split_world_points,
         )
         plot_curvature_compare(
             raw_world_path=raw_world_path,
@@ -904,11 +1146,29 @@ def main() -> int:
             smoothed_world_path=smoothed_world_path,
             out_path=curvature_seed_smooth_png,
             include_raw_path=False,
+            split_world_points=split_world_points,
+        )
+        plot_backend_code_curvature_compare(
+            raw_world_path=raw_world_path,
+            seed_world_path=seed_world_path,
+            smoothed_world_path=smoothed_world_path,
+            out_path=curvature_backend_png,
+            split_world_points=split_world_points,
+        )
+        plot_backend_code_curvature_compare(
+            raw_world_path=raw_world_path,
+            seed_world_path=seed_world_path,
+            smoothed_world_path=smoothed_world_path,
+            out_path=curvature_backend_seed_smooth_png,
+            include_raw_path=False,
+            split_world_points=split_world_points,
         )
         print(f"saved_png={fig_png}")
         print(f"saved_split_debug_png={split_debug_png}")
         print(f"saved_curvature_png={curvature_png}")
         print(f"saved_curvature_seed_smooth_png={curvature_seed_smooth_png}")
+        print(f"saved_curvature_backend_png={curvature_backend_png}")
+        print(f"saved_curvature_backend_seed_smooth_png={curvature_backend_seed_smooth_png}")
         return 0
 
     rng = random.Random(args.seed)
@@ -977,6 +1237,8 @@ def main() -> int:
     split_debug_png = out_dir / "offline_demo_split_points.png"
     curvature_png = out_dir / "curvature_compare.png"
     curvature_seed_smooth_png = out_dir / "curvature_compare_seed_smooth.png"
+    curvature_backend_png = out_dir / "curvature_compare_backend_code.png"
+    curvature_backend_seed_smooth_png = out_dir / "curvature_compare_backend_code_seed_smooth.png"
     meta_json = out_dir / "meta.json"
 
     write_raw_path_csv(raw_csv, raw_world_path)
@@ -1011,8 +1273,11 @@ def main() -> int:
         f"{smoother_lib_dir}:{existing_ld}" if existing_ld else str(smoother_lib_dir)
     )
     subprocess.run(cmd, check=True, env=smoother_env)
-    seed_world_path = read_smoothed_path_csv(seed_csv)
-    smoothed_world_path = read_smoothed_path_csv(smooth_csv)
+    seed_records = read_path_records_csv(seed_csv)
+    smoothed_records = read_path_records_csv(smooth_csv)
+    seed_world_path = [(x, y) for x, y, _ in seed_records]
+    smoothed_world_path = [(x, y) for x, y, _ in smoothed_records]
+    shift_world_points = extract_gear_shift_points(smoothed_records)
     split_world_points = read_split_points_csv(split_points_csv)
 
     plot_case(
@@ -1028,6 +1293,7 @@ def main() -> int:
         resolution=args.resolution,
         out_path=fig_png,
         split_world_points=split_world_points,
+        shift_world_points=shift_world_points,
     )
     plot_split_points_debug(
         occ=occ,
@@ -1040,12 +1306,14 @@ def main() -> int:
         origin_y=args.origin_y,
         resolution=args.resolution,
         out_path=split_debug_png,
+        shift_world_points=shift_world_points,
     )
     plot_curvature_compare(
         raw_world_path=raw_world_path,
         seed_world_path=seed_world_path,
         smoothed_world_path=smoothed_world_path,
         out_path=curvature_png,
+        split_world_points=split_world_points,
     )
     plot_curvature_compare(
         raw_world_path=raw_world_path,
@@ -1053,6 +1321,22 @@ def main() -> int:
         smoothed_world_path=smoothed_world_path,
         out_path=curvature_seed_smooth_png,
         include_raw_path=False,
+        split_world_points=split_world_points,
+    )
+    plot_backend_code_curvature_compare(
+        raw_world_path=raw_world_path,
+        seed_world_path=seed_world_path,
+        smoothed_world_path=smoothed_world_path,
+        out_path=curvature_backend_png,
+        split_world_points=split_world_points,
+    )
+    plot_backend_code_curvature_compare(
+        raw_world_path=raw_world_path,
+        seed_world_path=seed_world_path,
+        smoothed_world_path=smoothed_world_path,
+        out_path=curvature_backend_seed_smooth_png,
+        include_raw_path=False,
+        split_world_points=split_world_points,
     )
 
     meta = {
@@ -1090,6 +1374,8 @@ def main() -> int:
     print(f"saved_split_debug_png={split_debug_png}")
     print(f"saved_curvature_png={curvature_png}")
     print(f"saved_curvature_seed_smooth_png={curvature_seed_smooth_png}")
+    print(f"saved_curvature_backend_png={curvature_backend_png}")
+    print(f"saved_curvature_backend_seed_smooth_png={curvature_backend_seed_smooth_png}")
     print(f"saved_meta={meta_json}")
     print(f"map_index={map_index}")
     print(f"start_xy={start_xy}")

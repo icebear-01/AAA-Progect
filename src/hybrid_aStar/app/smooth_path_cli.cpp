@@ -2,6 +2,7 @@
 
 #include <yaml-cpp/yaml.h>
 
+#include <algorithm>
 #include <cmath>
 #include <fstream>
 #include <iostream>
@@ -219,27 +220,47 @@ VectorVec4d ResamplePathUniform(const VectorVec4d& path, double step) {
         return path;
     }
 
+    std::vector<double> cumulative_length(path.size(), 0.0);
+    for (std::size_t i = 1; i < path.size(); ++i) {
+        const double dx = path[i].x() - path[i - 1].x();
+        const double dy = path[i].y() - path[i - 1].y();
+        cumulative_length[i] = cumulative_length[i - 1] + std::hypot(dx, dy);
+    }
+    const double total_length = cumulative_length.back();
+    if (total_length <= 1e-6) {
+        return path;
+    }
+
     VectorVec4d resampled;
-    resampled.reserve(path.size() * 2);
+    resampled.reserve(std::max<std::size_t>(path.size(), static_cast<std::size_t>(std::ceil(total_length / step)) + 2));
     resampled.push_back(path.front());
 
-    for (std::size_t i = 0; i + 1 < path.size(); ++i) {
-        const double ax = path[i].x();
-        const double ay = path[i].y();
-        const double bx = path[i + 1].x();
-        const double by = path[i + 1].y();
-        const double dx = bx - ax;
-        const double dy = by - ay;
-        const double dist = std::hypot(dx, dy);
-        const int segments = std::max(1, static_cast<int>(std::ceil(dist / step)));
-        for (int seg = 1; seg <= segments; ++seg) {
-            const double ratio = static_cast<double>(seg) / static_cast<double>(segments);
-            Vec4d pose = Vec4d::Zero();
-            pose.x() = ax + dx * ratio;
-            pose.y() = ay + dy * ratio;
-            pose.w() = path[i].w();
-            resampled.emplace_back(pose);
+    std::size_t seg_idx = 0;
+    for (double target_s = step; target_s < total_length - 1e-6; target_s += step) {
+        while (seg_idx + 1 < cumulative_length.size() && cumulative_length[seg_idx + 1] < target_s) {
+            ++seg_idx;
         }
+        if (seg_idx + 1 >= path.size()) {
+            break;
+        }
+
+        const double seg_s0 = cumulative_length[seg_idx];
+        const double seg_s1 = cumulative_length[seg_idx + 1];
+        const double seg_len = seg_s1 - seg_s0;
+        const double ratio = seg_len <= 1e-9 ? 0.0 : (target_s - seg_s0) / seg_len;
+
+        Vec4d pose = Vec4d::Zero();
+        pose.x() = path[seg_idx].x() + (path[seg_idx + 1].x() - path[seg_idx].x()) * ratio;
+        pose.y() = path[seg_idx].y() + (path[seg_idx + 1].y() - path[seg_idx].y()) * ratio;
+        pose.w() = path[seg_idx].w();
+        resampled.emplace_back(pose);
+    }
+
+    const Vec2d endpoint_delta = path.back().head(2) - resampled.back().head(2);
+    if (endpoint_delta.norm() > 1e-6) {
+        resampled.push_back(path.back());
+    } else {
+        resampled.back() = path.back();
     }
 
     if (resampled.size() == 1) {

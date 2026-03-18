@@ -1052,6 +1052,26 @@ VectorVec4d HybridAStar::Smooth(VectorVec4d &path)
         VectorVec4d smoothed_path;  //分段路径
 
         const int PathPointsNum=RawPath[pathNumber].size();
+        std::vector<double> path_segment_lengths;
+        path_segment_lengths.reserve(std::max(0, PathPointsNum - 1));
+        for (int i = 0; i + 1 < PathPointsNum; ++i) {
+            path_segment_lengths.push_back((RawPath[pathNumber][i + 1].head(2) - RawPath[pathNumber][i].head(2)).norm());
+        }
+        double nominal_interval_length = 0.0;
+        if (path_segment_lengths.size() > 1) {
+            for (std::size_t seg_idx = 0; seg_idx + 1 < path_segment_lengths.size(); ++seg_idx) {
+                nominal_interval_length += path_segment_lengths[seg_idx];
+            }
+            nominal_interval_length /= static_cast<double>(path_segment_lengths.size() - 1);
+        } else if (!path_segment_lengths.empty()) {
+            nominal_interval_length = path_segment_lengths.front();
+        }
+        const bool has_short_tail =
+            path_segment_lengths.size() >= 2 &&
+            nominal_interval_length > 1e-6 &&
+            path_segment_lengths.back() < 0.8 * nominal_interval_length;
+        const int tail_relaxed_curvature_constraints =
+            has_short_tail ? std::min(2, PathPointsNum - 2) : 0;
         const int num_of_pos_variables_ = PathPointsNum * 2;                            //2*n
         const int num_of_slack_variables_ = PathPointsNum - 2;                          //n-2
         const int num_of_variables_ = num_of_pos_variables_ + num_of_slack_variables_;  //3n-2
@@ -1126,7 +1146,14 @@ VectorVec4d HybridAStar::Smooth(VectorVec4d &path)
             Eigen::VectorXd ub = Eigen::VectorXd::Zero(num_of_constraints_);
 
             int pen_itr = 0;
-            double w_slack=5e3;
+            double initial_w_slack = 5e5;
+            if (const char* w_slack_env = std::getenv("HYBRID_ASTAR_INITIAL_W_SLACK")) {
+                const double parsed_w_slack = std::atof(w_slack_env);
+                if (std::isfinite(parsed_w_slack) && parsed_w_slack > 0.0) {
+                    initial_w_slack = parsed_w_slack;
+                }
+            }
+            double w_slack=initial_w_slack;
             int sqp_num=0;
             while (pen_itr<sqp_pen_max_iter_)
             {
@@ -1167,7 +1194,11 @@ VectorVec4d HybridAStar::Smooth(VectorVec4d &path)
                     for (int i = 0; i < num_of_curvature_constraints_; i++)
                     {
                         lb(num_of_variable_constraints_+i)=-1e15;
-                        ub(num_of_variable_constraints_+i)=curvature_constraint_sqr-lin_cache[i][6];
+                        const bool relax_tail_constraint =
+                            tail_relaxed_curvature_constraints > 0 &&
+                            i >= num_of_curvature_constraints_ - tail_relaxed_curvature_constraints;
+                        ub(num_of_variable_constraints_+i)=
+                            relax_tail_constraint ? 1e15 : curvature_constraint_sqr-lin_cache[i][6];
                         // std::cout<<"total_length:"<<total_length<<std::endl;
                         // std::cout<<"curvature_constraint_sqr:"<<curvature_constraint_sqr<<" , lin_cache[i][6]:"<<lin_cache[i][6]<<std::endl;
                     }
@@ -1587,11 +1618,88 @@ VectorVec4d HybridAStar::Smooth(VectorVec4d &path)
         return true;
     };
 
+    auto redistribute_local_spacing = [&](VectorVec4d &candidate, int left_anchor, int right_anchor) {
+        const int span = right_anchor - left_anchor;
+        if (span < 2) {
+            return;
+        }
+        std::vector<Vec2d> local_points(span + 1);
+        std::vector<double> local_arc(span + 1, 0.0);
+        for (int local_idx = 0; local_idx <= span; ++local_idx) {
+            local_points[local_idx] = candidate[left_anchor + local_idx].head(2);
+            if (local_idx == 0) {
+                continue;
+            }
+            local_arc[local_idx] =
+                local_arc[local_idx - 1] + (local_points[local_idx] - local_points[local_idx - 1]).norm();
+        }
+        const double total_arc = local_arc.back();
+        if (total_arc <= 1e-6) {
+            return;
+        }
+        int upper_idx = 1;
+        for (int local_idx = 1; local_idx < span; ++local_idx) {
+            const double target_arc = total_arc * static_cast<double>(local_idx) / static_cast<double>(span);
+            while (upper_idx < span && local_arc[upper_idx] < target_arc) {
+                ++upper_idx;
+            }
+            const int lower_idx = std::max(0, upper_idx - 1);
+            const double denom = std::max(1e-9, local_arc[upper_idx] - local_arc[lower_idx]);
+            const double ratio =
+                std::max(0.0, std::min(1.0, (target_arc - local_arc[lower_idx]) / denom));
+            const Vec2d blended_point =
+                (1.0 - ratio) * local_points[lower_idx] + ratio * local_points[upper_idx];
+            candidate[left_anchor + local_idx].x() = blended_point.x();
+            candidate[left_anchor + local_idx].y() = blended_point.y();
+        }
+    };
+    auto evaluate_window_max_curvature = [&](const VectorVec4d &path, int left_anchor, int right_anchor) {
+        if (path.size() < 3) {
+            return 0.0;
+        }
+        double total_length = 0.0;
+        for (size_t idx = 0; idx + 1 < path.size(); ++idx) {
+            total_length += (path[idx + 1].head(2) - path[idx].head(2)).norm();
+        }
+        const double average_interval_length =
+            total_length / std::max(1.0, static_cast<double>(path.size() - 1));
+        if (average_interval_length <= 1e-6) {
+            return 0.0;
+        }
+        const double inv_interval_sqr = 1.0 / (average_interval_length * average_interval_length);
+        const int eval_start = std::max(1, left_anchor - 1);
+        const int eval_end = std::min(static_cast<int>(path.size()) - 2, right_anchor + 1);
+        double max_curvature = 0.0;
+        for (int idx = eval_start; idx <= eval_end; ++idx) {
+            const Vec2d second_diff =
+                path[idx - 1].head(2) - 2.0 * path[idx].head(2) + path[idx + 1].head(2);
+            max_curvature = std::max(max_curvature, second_diff.norm() * inv_interval_sqr);
+        }
+        return max_curvature;
+    };
+    auto validate_local_window = [&](const VectorVec4d &candidate, int left_anchor, int right_anchor) {
+        for (int idx = left_anchor; idx <= right_anchor; ++idx) {
+            const int prev_idx = std::max(0, idx - 1);
+            const int next_idx = std::min(static_cast<int>(candidate.size()) - 1, idx + 1);
+            double heading = candidate[idx].z();
+            if (next_idx != prev_idx) {
+                heading = std::atan2(candidate[next_idx].y() - candidate[prev_idx].y(),
+                                     candidate[next_idx].x() - candidate[prev_idx].x());
+            }
+            if (BeyondBoundary(candidate[idx].head(2)) || !CheckCollision(candidate[idx].x(), candidate[idx].y(), heading)) {
+                return false;
+            }
+            if (idx < right_anchor && !segment_collision_free(candidate[idx], candidate[idx + 1])) {
+                return false;
+            }
+        }
+        return true;
+    };
     auto apply_seam_blend = [&](VectorVec4d &path_to_blend) {
         if (path_to_blend.size() < 8 || seam_indices.empty()) {
             return;
         }
-        const int blend_half_window = 3;
+        const int blend_half_window = 2;
         for (const int seam_idx : seam_indices) {
             if (seam_idx <= blend_half_window || seam_idx >= static_cast<int>(path_to_blend.size()) - blend_half_window - 1) {
                 continue;
@@ -1605,15 +1713,15 @@ VectorVec4d HybridAStar::Smooth(VectorVec4d &path)
             VectorVec4d candidate = path_to_blend;
             const Vec2d p0 = path_to_blend[left_anchor].head(2);
             const Vec2d p1 = path_to_blend[right_anchor].head(2);
-            Vec2d left_dir = path_to_blend[seam_idx].head(2) - p0;
-            Vec2d right_dir = p1 - path_to_blend[seam_idx].head(2);
+            Vec2d left_dir = path_to_blend[left_anchor + 1].head(2) - p0;
+            Vec2d right_dir = p1 - path_to_blend[right_anchor - 1].head(2);
             if (left_dir.norm() < 1e-6 || right_dir.norm() < 1e-6) {
                 continue;
             }
             left_dir.normalize();
             right_dir.normalize();
             const double chord = std::max(1e-6, (p1 - p0).norm());
-            const double tangent_scale = 0.45 * chord;
+            const double tangent_scale = 0.2 * chord;
             const Vec2d m0 = left_dir * tangent_scale;
             const Vec2d m1 = right_dir * tangent_scale;
 
@@ -1630,23 +1738,14 @@ VectorVec4d HybridAStar::Smooth(VectorVec4d &path)
                 candidate[idx].x() = blended.x();
                 candidate[idx].y() = blended.y();
             }
+            redistribute_local_spacing(candidate, left_anchor, right_anchor);
 
-            bool valid = true;
-            for (int idx = left_anchor; idx <= right_anchor; ++idx) {
-                const int prev_idx = std::max(0, idx - 1);
-                const int next_idx = std::min(static_cast<int>(candidate.size()) - 1, idx + 1);
-                double heading = candidate[idx].z();
-                if (next_idx != prev_idx) {
-                    heading = std::atan2(candidate[next_idx].y() - candidate[prev_idx].y(),
-                                         candidate[next_idx].x() - candidate[prev_idx].x());
-                }
-                if (BeyondBoundary(candidate[idx].head(2)) || !CheckCollision(candidate[idx].x(), candidate[idx].y(), heading)) {
+            bool valid = validate_local_window(candidate, left_anchor, right_anchor);
+            if (valid) {
+                const double max_before = evaluate_window_max_curvature(path_to_blend, left_anchor, right_anchor);
+                const double max_after = evaluate_window_max_curvature(candidate, left_anchor, right_anchor);
+                if (max_after > max_before || max_after > curvature_constraint_ * 1.05) {
                     valid = false;
-                    break;
-                }
-                if (idx < right_anchor && !segment_collision_free(candidate[idx], candidate[idx + 1])) {
-                    valid = false;
-                    break;
                 }
             }
             if (valid) {
@@ -1657,8 +1756,40 @@ VectorVec4d HybridAStar::Smooth(VectorVec4d &path)
             }
         }
     };
+    auto apply_seed_guided_patch = [&](VectorVec4d &path_to_patch) {
+        if (path_to_patch.size() != path.size() || path_to_patch.size() < 10 || seam_indices.empty()) {
+            return;
+        }
+        const int patch_half_window = 4;
+        for (const int seam_idx : seam_indices) {
+            if (seam_idx <= patch_half_window || seam_idx >= static_cast<int>(path_to_patch.size()) - patch_half_window - 1) {
+                continue;
+            }
+            const int left_anchor = seam_idx - patch_half_window;
+            const int right_anchor = seam_idx + patch_half_window;
+            VectorVec4d candidate = path_to_patch;
+            for (int idx = left_anchor + 1; idx < right_anchor; ++idx) {
+                const double normalized_distance =
+                    static_cast<double>(std::abs(idx - seam_idx)) / static_cast<double>(patch_half_window);
+                const double alpha = 0.7 * std::max(0.0, 1.0 - normalized_distance);
+                candidate[idx].x() =
+                    (1.0 - alpha) * path_to_patch[idx].x() + alpha * path[idx].x();
+                candidate[idx].y() =
+                    (1.0 - alpha) * path_to_patch[idx].y() + alpha * path[idx].y();
+            }
+            redistribute_local_spacing(candidate, left_anchor, right_anchor);
+            if (!validate_local_window(candidate, left_anchor, right_anchor)) {
+                continue;
+            }
+            for (int idx = left_anchor + 1; idx < right_anchor; ++idx) {
+                path_to_patch[idx].x() = candidate[idx].x();
+                path_to_patch[idx].y() = candidate[idx].y();
+            }
+        }
+    };
 
     apply_seam_blend(return_smoothed_path);
+    apply_seed_guided_patch(return_smoothed_path);
     GetPathYaw(return_smoothed_path);
     
     std::cout<<"求解 "<<solver_num<<" 次完成优化！！！"<<std::endl;
