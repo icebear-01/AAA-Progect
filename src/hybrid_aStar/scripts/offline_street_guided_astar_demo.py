@@ -413,6 +413,38 @@ def curvature_profile(path: Sequence[Tuple[float, float]], step: float = 0.10) -
     return s, kappa
 
 
+def project_split_points_to_arc_length(
+    path: Sequence[Tuple[float, float]],
+    split_world_points: Sequence[Tuple[int, float, float]],
+) -> List[Tuple[int, float]]:
+    if len(path) < 2 or not split_world_points:
+        return []
+    path_np = np.asarray(path, dtype=np.float64)
+    s = cumulative_arc_length(path)
+    split_s: List[Tuple[int, float]] = []
+    for idx, x, y in split_world_points:
+        query = np.asarray([x, y], dtype=np.float64)
+        best_dist_sqr = float("inf")
+        best_s = 0.0
+        for seg_idx in range(len(path_np) - 1):
+            a = path_np[seg_idx]
+            b = path_np[seg_idx + 1]
+            ab = b - a
+            denom = float(np.dot(ab, ab))
+            if denom <= 1e-12:
+                t = 0.0
+                proj = a
+            else:
+                t = float(np.clip(np.dot(query - a, ab) / denom, 0.0, 1.0))
+                proj = a + t * ab
+            dist_sqr = float(np.dot(query - proj, query - proj))
+            if dist_sqr < best_dist_sqr:
+                best_dist_sqr = dist_sqr
+                best_s = float(s[seg_idx] + np.linalg.norm(proj - a))
+        split_s.append((idx, best_s))
+    return split_s
+
+
 def preprocess_seed_path(
     occ: np.ndarray,
     raw_world_path: Sequence[Tuple[float, float]],
@@ -779,6 +811,7 @@ def plot_curvature_compare(
     smoothed_world_path: Sequence[Tuple[float, float]],
     out_path: Path,
     include_raw_path: bool = True,
+    split_world_points: Sequence[Tuple[int, float, float]] = (),
 ) -> None:
     fig, ax = plt.subplots(1, 1, figsize=(7.2, 4.3), facecolor="#fbfbf8")
     ax.set_facecolor("#fbfbf8")
@@ -805,6 +838,24 @@ def plot_curvature_compare(
             linewidth=linewidth,
             label=label,
         )
+
+    split_s = project_split_points_to_arc_length(seed_world_path, split_world_points)
+    if split_s:
+        ymin, ymax = ax.get_ylim()
+        y_text = ymax - 0.04 * (ymax - ymin)
+        for idx, split_arc in split_s:
+            ax.axvline(split_arc, color="#1f4e99", linestyle=":", linewidth=0.85, alpha=0.9, zorder=1)
+            ax.text(
+                split_arc,
+                y_text,
+                str(idx + 1),
+                fontsize=8,
+                color="#1f4e99",
+                ha="center",
+                va="bottom",
+                zorder=6,
+                path_effects=[pe.Stroke(linewidth=1.2, foreground="#fffef8"), pe.Normal()],
+            )
 
     ax.set_xlabel("s [m]")
     ax.set_ylabel("kappa [1/m]")
@@ -897,6 +948,7 @@ def main() -> int:
             seed_world_path=seed_world_path,
             smoothed_world_path=smoothed_world_path,
             out_path=curvature_png,
+            split_world_points=split_world_points,
         )
         plot_curvature_compare(
             raw_world_path=raw_world_path,
@@ -904,6 +956,7 @@ def main() -> int:
             smoothed_world_path=smoothed_world_path,
             out_path=curvature_seed_smooth_png,
             include_raw_path=False,
+            split_world_points=split_world_points,
         )
         print(f"saved_png={fig_png}")
         print(f"saved_split_debug_png={split_debug_png}")
@@ -1046,6 +1099,7 @@ def main() -> int:
         seed_world_path=seed_world_path,
         smoothed_world_path=smoothed_world_path,
         out_path=curvature_png,
+        split_world_points=split_world_points,
     )
     plot_curvature_compare(
         raw_world_path=raw_world_path,
@@ -1053,6 +1107,7 @@ def main() -> int:
         smoothed_world_path=smoothed_world_path,
         out_path=curvature_seed_smooth_png,
         include_raw_path=False,
+        split_world_points=split_world_points,
     )
 
     meta = {

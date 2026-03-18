@@ -1059,14 +1059,21 @@ VectorVec4d HybridAStar::Smooth(VectorVec4d &path)
         const int num_of_variable_constraints_ = num_of_variables_;   //3n-2
         const int num_of_curvature_constraints_ = PathPointsNum - 2;  //n-2
         const int num_of_constraints_expectStartEnd =num_of_variable_constraints_ + num_of_curvature_constraints_ ; //4n-4
-        // Keep only endpoint position locks here. Segment tangent continuity is
-        // handled later by the seam blending pass, which is less aggressive
-        // than hard tangent constraints inside each SQP subproblem.
+        // Keep endpoint position locks as hard constraints. For later segments,
+        // start tangent / second-difference continuity is softly tied to the
+        // already-optimized previous overlap, while seam blending still does
+        // the final stitching pass.
         const int endpoint_lock_points = 1;
         const int endpoint_constraint_half = endpoint_lock_points * 2;
         const int endpoint_constraint_count = endpoint_constraint_half * 2;
         const int num_of_constraints_ = num_of_constraints_expectStartEnd + endpoint_constraint_count;
-        const double w_smooth = 3e6;const  double w_length = 10;const  double w_ref = 1; //各部分权重
+        const double w_smooth = 3e6;
+        const double w_length = 10;
+        const double w_ref = 1;
+        const double w_endpoint_heading = fix_endpoint_heading_ ? 5e4 : 0.0;
+        const double w_endpoint_curvature = fix_endpoint_heading_ ? 1.5e5 : 0.0;
+        const double w_connection_tangent = 2e4;
+        const double w_connection_curvature = 1e5;
 
                 //ref初始化
         Eigen::VectorXd referenceline   = Eigen::VectorXd::Zero(2*PathPointsNum);  //2n
@@ -1310,6 +1317,107 @@ VectorVec4d HybridAStar::Smooth(VectorVec4d &path)
                     std::cout << std::endl; // 每打印一行后换行
                     // std::cout<<" -- 求解中 -- "<<std::endl;
                     H = 2 * (w_smooth * A1.transpose() * A1 + w_length * A2.transpose() * A2 + w_ref * A3);
+
+                    auto add_soft_linear_tracking = [&](const std::vector<std::pair<int, double>>& terms,
+                                                        double target,
+                                                        double weight) {
+                        if (weight <= 0.0 || terms.empty()) {
+                            return;
+                        }
+                        for (const auto& term_i : terms) {
+                            const int row = term_i.first;
+                            const double coeff_i = term_i.second;
+                            f(row) += -2.0 * weight * target * coeff_i;
+                            for (const auto& term_j : terms) {
+                                const int col = term_j.first;
+                                const double coeff_j = term_j.second;
+                                H(row, col) += 2.0 * weight * coeff_i * coeff_j;
+                            }
+                        }
+                    };
+
+                    if (w_endpoint_heading > 0.0 && PathPointsNum >= 3) {
+                        const Vec2d start_ref_tangent =
+                            RawPath[pathNumber][1].head(2) - RawPath[pathNumber][0].head(2);
+                        const Vec2d end_ref_tangent =
+                            RawPath[pathNumber][PathPointsNum - 1].head(2) -
+                            RawPath[pathNumber][PathPointsNum - 2].head(2);
+
+                        add_soft_linear_tracking({{0, -1.0}, {2, 1.0}},
+                                                 start_ref_tangent.x(),
+                                                 w_endpoint_heading);
+                        add_soft_linear_tracking({{1, -1.0}, {3, 1.0}},
+                                                 start_ref_tangent.y(),
+                                                 w_endpoint_heading);
+
+                        const int end_prev_x = 2 * (PathPointsNum - 2);
+                        const int end_prev_y = end_prev_x + 1;
+                        const int end_last_x = 2 * (PathPointsNum - 1);
+                        const int end_last_y = end_last_x + 1;
+                        add_soft_linear_tracking({{end_prev_x, -1.0}, {end_last_x, 1.0}},
+                                                 end_ref_tangent.x(),
+                                                 w_endpoint_heading);
+                        add_soft_linear_tracking({{end_prev_y, -1.0}, {end_last_y, 1.0}},
+                                                 end_ref_tangent.y(),
+                                                 w_endpoint_heading);
+                    }
+
+                    if (w_endpoint_curvature > 0.0 && PathPointsNum >= 4) {
+                        const Vec2d start_ref_curvature =
+                            RawPath[pathNumber][2].head(2) -
+                            2.0 * RawPath[pathNumber][1].head(2) +
+                            RawPath[pathNumber][0].head(2);
+                        const Vec2d end_ref_curvature =
+                            RawPath[pathNumber][PathPointsNum - 1].head(2) -
+                            2.0 * RawPath[pathNumber][PathPointsNum - 2].head(2) +
+                            RawPath[pathNumber][PathPointsNum - 3].head(2);
+
+                        add_soft_linear_tracking({{0, 1.0}, {2, -2.0}, {4, 1.0}},
+                                                 start_ref_curvature.x(),
+                                                 w_endpoint_curvature);
+                        add_soft_linear_tracking({{1, 1.0}, {3, -2.0}, {5, 1.0}},
+                                                 start_ref_curvature.y(),
+                                                 w_endpoint_curvature);
+
+                        const int end_prev2_x = 2 * (PathPointsNum - 3);
+                        const int end_prev2_y = end_prev2_x + 1;
+                        const int end_prev_x = 2 * (PathPointsNum - 2);
+                        const int end_prev_y = end_prev_x + 1;
+                        const int end_last_x = 2 * (PathPointsNum - 1);
+                        const int end_last_y = end_last_x + 1;
+                        add_soft_linear_tracking({{end_prev2_x, 1.0}, {end_prev_x, -2.0}, {end_last_x, 1.0}},
+                                                 end_ref_curvature.x(),
+                                                 w_endpoint_curvature);
+                        add_soft_linear_tracking({{end_prev2_y, 1.0}, {end_prev_y, -2.0}, {end_last_y, 1.0}},
+                                                 end_ref_curvature.y(),
+                                                 w_endpoint_curvature);
+                    }
+
+                    if (pathNumber > 0 && PathPointsNum >= 3 && !smoothed_paths.empty()) {
+                        const auto& prev_segment = smoothed_paths.back();
+                        const auto& prev_info = segment_infos[pathNumber - 1];
+                        const auto& curr_info = segment_infos[pathNumber];
+                        int overlap_count = std::max(0, prev_info.expand_end - curr_info.expand_start + 1);
+                        overlap_count = std::min(overlap_count,
+                                                 std::min(static_cast<int>(prev_segment.size()), PathPointsNum));
+                        if (overlap_count >= 3) {
+                            const int prev_overlap_start = static_cast<int>(prev_segment.size()) - overlap_count;
+                            const Vec2d prev_p0 = prev_segment[prev_overlap_start].head(2);
+                            const Vec2d prev_p1 = prev_segment[prev_overlap_start + 1].head(2);
+                            const Vec2d prev_p2 = prev_segment[prev_overlap_start + 2].head(2);
+                            const Vec2d tangent_ref = prev_p1 - prev_p0;
+                            const Vec2d curvature_ref = prev_p2 - 2.0 * prev_p1 + prev_p0;
+
+                            add_soft_linear_tracking({{0, -1.0}, {2, 1.0}}, tangent_ref.x(), w_connection_tangent);
+                            add_soft_linear_tracking({{1, -1.0}, {3, 1.0}}, tangent_ref.y(), w_connection_tangent);
+                            add_soft_linear_tracking({{0, 1.0}, {2, -2.0}, {4, 1.0}},
+                                                     curvature_ref.x(),
+                                                     w_connection_curvature);
+                            add_soft_linear_tracking({{1, 1.0}, {3, -2.0}, {5, 1.0}},
+                                                     curvature_ref.y(),
+                                                     w_connection_curvature);
+                        }
+                    }
                     
                     // for (int i = 0; i < H.rows(); ++i) {
                     //     for (int j = 0; j < H.cols(); ++j) {
@@ -2033,6 +2141,10 @@ std::vector<int> HybridAStar::FindGeometrySplitIndices(const VectorVec4d& path) 
     if (!filtered.empty() && n - filtered.back() < min_segment_points) {
         filtered.pop_back();
     }
+    const char* drop_last_split_env = std::getenv("HYBRID_ASTAR_DROP_LAST_SPLIT_POINT");
+    if (drop_last_split_env != nullptr && std::string(drop_last_split_env) == "1" && !filtered.empty()) {
+        filtered.pop_back();
+    }
     if (debug_splits) {
         std::cout << "[split-debug] n=" << n
                   << " heading_deg=30 cumulative_deg=60 narrow_enter=" << narrow_enter_clearance_thresh
@@ -2100,7 +2212,7 @@ std::vector<VectorVec4d> HybridAStar::SplitSegmentByGeometry(const VectorVec4d& 
 double HybridAStar::CalculateConstraintViolation(const Eigen::VectorXd &points,int PathPointsNum,double curvature_constraint_sqr) {
 
   double max_cviolation = 0.0;
-  for (int index = 3; index < PathPointsNum-3; index++) {  //TODO：因为前三个点是固定的  //可能会有BUG？待验证 //down
+  for (int index = 1; index < PathPointsNum-1; index++) {
         double x_f = points[2*(index-1)];
         double x_m = points[2*index];
         double x_l = points[2*(index+1)];
