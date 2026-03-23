@@ -166,7 +166,7 @@ private:
     double steering_change_penalty_;     //2
 
     double path_length_ = 0.0;
-    const float curvature_constraint_=1.0;  //最大曲率限制
+    const float curvature_constraint_=0.8;  //最大曲率限制
 
     // Settings of sqp
     int sqp_pen_max_iter_ = 100;    //100

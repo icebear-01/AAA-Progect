@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -47,6 +48,7 @@ struct Args {
     std::string case_name{"street_demo_random"};
     int onnx_intra_threads{1};
     int onnx_inter_threads{1};
+    bool compare_baseline{false};
 };
 
 struct StreetMaps {
@@ -151,6 +153,8 @@ Args ParseArgs(int argc, char** argv) {
             args.onnx_intra_threads = std::stoi(argv[++i]);
         } else if (token == "--onnx-inter-threads" && i + 1 < argc) {
             args.onnx_inter_threads = std::stoi(argv[++i]);
+        } else if (token == "--compare-baseline") {
+            args.compare_baseline = true;
         } else {
             throw std::runtime_error("Unknown or incomplete argument: " + token);
         }
@@ -569,6 +573,84 @@ void WriteMetaJson(const std::string& path,
         << "}\n";
 }
 
+double ComputeWorldPathLength(const VectorVec4d& path) {
+    double length = 0.0;
+    for (std::size_t i = 1; i < path.size(); ++i) {
+        const double dx = path[i].x() - path[i - 1].x();
+        const double dy = path[i].y() - path[i - 1].y();
+        length += std::hypot(dx, dy);
+    }
+    return length;
+}
+
+void WriteCompareJson(const std::string& path,
+                      int map_index,
+                      const Problem& problem,
+                      double baseline_search_ms,
+                      int baseline_expanded_nodes,
+                      std::size_t baseline_path_points,
+                      double baseline_path_length_m,
+                      double guidance_infer_ms,
+                      double guided_search_ms,
+                      int guided_expanded_nodes,
+                      std::size_t guided_path_points,
+                      double guided_path_length_m) {
+    std::ofstream out(path);
+    if (!out.is_open()) {
+        throw std::runtime_error("failed to open compare json: " + path);
+    }
+    out << "{\n"
+        << "  \"map_index\": " << map_index << ",\n"
+        << "  \"start_xy\": [" << problem.start_xy.x() << ", " << problem.start_xy.y() << "],\n"
+        << "  \"goal_xy\": [" << problem.goal_xy.x() << ", " << problem.goal_xy.y() << "],\n"
+        << "  \"traditional_astar\": {\n"
+        << "    \"search_ms\": " << baseline_search_ms << ",\n"
+        << "    \"expanded_nodes\": " << baseline_expanded_nodes << ",\n"
+        << "    \"path_points\": " << baseline_path_points << ",\n"
+        << "    \"path_length_m\": " << baseline_path_length_m << "\n"
+        << "  },\n"
+        << "  \"improved_astar\": {\n"
+        << "    \"guidance_infer_ms\": " << guidance_infer_ms << ",\n"
+        << "    \"search_ms\": " << guided_search_ms << ",\n"
+        << "    \"total_frontend_ms\": " << (guidance_infer_ms + guided_search_ms) << ",\n"
+        << "    \"expanded_nodes\": " << guided_expanded_nodes << ",\n"
+        << "    \"path_points\": " << guided_path_points << ",\n"
+        << "    \"path_length_m\": " << guided_path_length_m << "\n"
+        << "  },\n"
+        << "  \"improvement\": {\n"
+        << "    \"expanded_nodes_delta\": " << (guided_expanded_nodes - baseline_expanded_nodes) << ",\n"
+        << "    \"expanded_nodes_ratio\": "
+        << (baseline_expanded_nodes > 0 ? static_cast<double>(guided_expanded_nodes) / static_cast<double>(baseline_expanded_nodes) : 0.0) << ",\n"
+        << "    \"search_ms_delta\": " << (guided_search_ms - baseline_search_ms) << ",\n"
+        << "    \"search_ms_ratio\": "
+        << (baseline_search_ms > 1e-9 ? guided_search_ms / baseline_search_ms : 0.0) << ",\n"
+        << "    \"frontend_total_ms_delta\": " << ((guidance_infer_ms + guided_search_ms) - baseline_search_ms) << "\n"
+        << "  }\n"
+        << "}\n";
+}
+
+void WriteCompareCsv(const std::string& path,
+                     double baseline_search_ms,
+                     int baseline_expanded_nodes,
+                     std::size_t baseline_path_points,
+                     double baseline_path_length_m,
+                     double guidance_infer_ms,
+                     double guided_search_ms,
+                     int guided_expanded_nodes,
+                     std::size_t guided_path_points,
+                     double guided_path_length_m) {
+    std::ofstream out(path);
+    if (!out.is_open()) {
+        throw std::runtime_error("failed to open compare csv: " + path);
+    }
+    out << "method,guidance_infer_ms,search_ms,total_frontend_ms,expanded_nodes,path_points,path_length_m\n";
+    out << "traditional_astar,0," << baseline_search_ms << "," << baseline_search_ms << ","
+        << baseline_expanded_nodes << "," << baseline_path_points << "," << baseline_path_length_m << "\n";
+    out << "improved_astar," << guidance_infer_ms << "," << guided_search_ms << ","
+        << (guidance_infer_ms + guided_search_ms) << ","
+        << guided_expanded_nodes << "," << guided_path_points << "," << guided_path_length_m << "\n";
+}
+
 std::string Quote(const std::string& s) {
     return "\"" + s + "\"";
 }
@@ -606,10 +688,6 @@ int main(int argc, char** argv) {
 
         const Problem problem = SampleProblem(occupancy, maps.width, maps.height, args, rng);
 
-        GuidanceCostMapOnnx guidance_model(args.onnx_path, args.onnx_intra_threads, args.onnx_inter_threads);
-        const std::vector<float> guidance_cost =
-            guidance_model.Infer(occupancy, maps.width, maps.height, problem.start_xy, problem.goal_xy, 0.0f, 0.0f);
-
         GridAstarOptions options;
         options.lambda_guidance = args.lambda_guidance;
         options.heuristic_mode = args.heuristic_mode;
@@ -617,10 +695,51 @@ int main(int argc, char** argv) {
         options.guidance_integration_mode = args.guidance_integration_mode;
         options.guidance_bonus_threshold = args.guidance_bonus_threshold;
         options.allow_corner_cut = args.allow_corner_cut;
+        options.record_expanded_xy = false;
+
+        const std::vector<float> zero_guidance(static_cast<std::size_t>(maps.width * maps.height), 0.0f);
+        const auto baseline_search_begin = std::chrono::steady_clock::now();
+        GridAstarOptions baseline_options = options;
+        baseline_options.lambda_guidance = 0.0;
+        baseline_options.guidance_integration_mode = "g_cost";
+        const GridAstarResult baseline_search_result =
+            RunGuidedGridAstar(occupancy, maps.width, maps.height,
+                               problem.start_xy, problem.goal_xy,
+                               zero_guidance, baseline_options);
+        const auto baseline_search_end = std::chrono::steady_clock::now();
+        if (!baseline_search_result.success || baseline_search_result.path_xy.size() < 2) {
+            throw std::runtime_error("traditional A* failed");
+        }
+        const double baseline_search_ms =
+            std::chrono::duration<double, std::milli>(baseline_search_end - baseline_search_begin).count();
+
+        GuidanceCostMapOnnx guidance_model(args.onnx_path, args.onnx_intra_threads, args.onnx_inter_threads);
+        const auto infer_begin = std::chrono::steady_clock::now();
+        const std::vector<float> guidance_cost =
+            guidance_model.Infer(occupancy, maps.width, maps.height, problem.start_xy, problem.goal_xy, 0.0f, 0.0f);
+        const auto infer_end = std::chrono::steady_clock::now();
+        const double guidance_infer_ms =
+            std::chrono::duration<double, std::milli>(infer_end - infer_begin).count();
+
+        const auto guided_search_begin = std::chrono::steady_clock::now();
         const GridAstarResult search_result =
             RunGuidedGridAstar(occupancy, maps.width, maps.height, problem.start_xy, problem.goal_xy, guidance_cost, options);
+        const auto guided_search_end = std::chrono::steady_clock::now();
+        const double guided_search_ms =
+            std::chrono::duration<double, std::milli>(guided_search_end - guided_search_begin).count();
         if (!search_result.success || search_result.path_xy.size() < 2) {
             throw std::runtime_error("guided grid A* failed");
+        }
+
+        VectorVec4d baseline_world_path;
+        baseline_world_path.reserve(baseline_search_result.path_xy.size());
+        for (const auto& xy : baseline_search_result.path_xy) {
+            const Vec2d world_xy = GridToWorld(xy.x(), xy.y(), args.origin_x, args.origin_y, args.resolution);
+            Vec4d pose = Vec4d::Zero();
+            pose.x() = world_xy.x();
+            pose.y() = world_xy.y();
+            pose.w() = 1.0;
+            baseline_world_path.emplace_back(pose);
         }
 
         VectorVec4d raw_world_path;
@@ -644,12 +763,40 @@ int main(int argc, char** argv) {
         const std::string occupancy_csv = case_dir + "/occupancy.csv";
         const std::string guidance_csv = case_dir + "/guidance_cost.csv";
         const std::string meta_json = case_dir + "/meta.json";
+        const std::string traditional_raw_csv = case_dir + "/traditional_astar_raw_path.csv";
+        const std::string compare_json = case_dir + "/frontend_compare.json";
+        const std::string compare_csv = case_dir + "/frontend_compare.csv";
 
+        WriteRawPathCsv(traditional_raw_csv, baseline_world_path);
         WriteRawPathCsv(raw_csv, raw_world_path);
         WriteMatrixCsvInt(occupancy_csv, occupancy, maps.width, maps.height);
         WriteMatrixCsv(guidance_csv, guidance_cost, maps.width, maps.height);
         WriteSmootherYaml(smoother_yaml, occupancy, maps.width, maps.height, raw_world_path, args);
         WriteMetaJson(meta_json, args, map_index, maps.width, maps.height, problem, raw_world_path.size());
+        if (args.compare_baseline) {
+            WriteCompareJson(compare_json,
+                             map_index,
+                             problem,
+                             baseline_search_ms,
+                             baseline_search_result.expanded_nodes,
+                             baseline_world_path.size(),
+                             ComputeWorldPathLength(baseline_world_path),
+                             guidance_infer_ms,
+                             guided_search_ms,
+                             search_result.expanded_nodes,
+                             raw_world_path.size(),
+                             ComputeWorldPathLength(raw_world_path));
+            WriteCompareCsv(compare_csv,
+                            baseline_search_ms,
+                            baseline_search_result.expanded_nodes,
+                            baseline_world_path.size(),
+                            ComputeWorldPathLength(baseline_world_path),
+                            guidance_infer_ms,
+                            guided_search_ms,
+                            search_result.expanded_nodes,
+                            raw_world_path.size(),
+                            ComputeWorldPathLength(raw_world_path));
+        }
 
         {
             std::stringstream cmd;
@@ -676,11 +823,21 @@ int main(int argc, char** argv) {
 
         std::cout << "saved_case_dir=" << case_dir << std::endl;
         std::cout << "saved_raw_csv=" << raw_csv << std::endl;
+        std::cout << "saved_traditional_raw_csv=" << traditional_raw_csv << std::endl;
         std::cout << "saved_seed_csv=" << seed_csv << std::endl;
         std::cout << "saved_smoothed_csv=" << smooth_csv << std::endl;
         std::cout << "saved_occupancy_csv=" << occupancy_csv << std::endl;
         std::cout << "saved_guidance_csv=" << guidance_csv << std::endl;
         std::cout << "saved_meta=" << meta_json << std::endl;
+        if (args.compare_baseline) {
+            std::cout << "saved_frontend_compare_json=" << compare_json << std::endl;
+            std::cout << "saved_frontend_compare_csv=" << compare_csv << std::endl;
+            std::cout << "traditional_search_ms=" << baseline_search_ms << std::endl;
+            std::cout << "traditional_expanded_nodes=" << baseline_search_result.expanded_nodes << std::endl;
+            std::cout << "guided_infer_ms=" << guidance_infer_ms << std::endl;
+            std::cout << "guided_search_ms=" << guided_search_ms << std::endl;
+            std::cout << "guided_expanded_nodes=" << search_result.expanded_nodes << std::endl;
+        }
         std::cout << "map_index=" << map_index << std::endl;
         std::cout << "start_xy=(" << problem.start_xy.x() << "," << problem.start_xy.y() << ")" << std::endl;
         std::cout << "goal_xy=(" << problem.goal_xy.x() << "," << problem.goal_xy.y() << ")" << std::endl;

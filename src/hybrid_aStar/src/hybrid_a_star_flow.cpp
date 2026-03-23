@@ -92,6 +92,12 @@ HybridAStarFlow::HybridAStarFlow(ros::NodeHandle &nh) {
     guided_frontend_integration_mode_ =
         nh.param<std::string>("planner/guided_frontend_integration_mode", "g_cost");
     guided_frontend_bonus_threshold_ = nh.param("planner/guided_frontend_bonus_threshold", 0.5);
+    guided_frontend_clearance_weight_ = nh.param("planner/guided_frontend_clearance_weight", 0.0);
+    guided_frontend_clearance_safe_distance_ =
+        nh.param("planner/guided_frontend_clearance_safe_distance", 0.0);
+    guided_frontend_clearance_power_ = nh.param("planner/guided_frontend_clearance_power", 2.0);
+    guided_frontend_clearance_integration_mode_ =
+        nh.param<std::string>("planner/guided_frontend_clearance_integration_mode", "g_cost");
     guided_frontend_allow_corner_cut_ = nh.param("planner/guided_frontend_allow_corner_cut", false);
     guided_frontend_invert_guidance_cost_ = nh.param("planner/guided_frontend_invert_guidance_cost", false);
     guided_frontend_onnx_intra_threads_ = nh.param("planner/guided_frontend_onnx_intra_threads", 1);
@@ -220,6 +226,31 @@ bool HybridAStarFlow::LoadGuidedFrontendPath(const std::string &path_csv, Vector
     return true;
 }
 
+void HybridAStarFlow::InvalidateGuidedFrontendOccupancyCache() {
+    guided_frontend_occupancy_row_major_valid_ = false;
+    guided_frontend_occupancy_row_major_.clear();
+    if (guided_frontend_onnx_) {
+        guided_frontend_onnx_->InvalidateOccupancyCache();
+    }
+}
+
+const std::vector<int>& HybridAStarFlow::GetGuidedFrontendOccupancyRowMajor() {
+    if (guided_frontend_occupancy_row_major_valid_) {
+        return guided_frontend_occupancy_row_major_;
+    }
+
+    guided_frontend_occupancy_row_major_.clear();
+    guided_frontend_occupancy_row_major_.reserve(
+        static_cast<std::size_t>(grid_obstacle_width_ * grid_obstacle_height_));
+    for (int y = 0; y < grid_obstacle_height_; ++y) {
+        for (int x = 0; x < grid_obstacle_width_; ++x) {
+            guided_frontend_occupancy_row_major_.push_back(grid_static_occupancy[x][y]);
+        }
+    }
+    guided_frontend_occupancy_row_major_valid_ = true;
+    return guided_frontend_occupancy_row_major_;
+}
+
 bool HybridAStarFlow::PlanWithTransformerGuidedAstarPython(
     const Vec4d &start_state,
     const Vec4d &goal_state,
@@ -253,7 +284,12 @@ bool HybridAStarFlow::PlanWithTransformerGuidedAstarPython(
         << "--heuristic-mode " << "\"" << guided_frontend_heuristic_mode_ << "\" "
         << "--heuristic-weight " << guided_frontend_heuristic_weight_ << " "
         << "--guidance-integration-mode " << "\"" << guided_frontend_integration_mode_ << "\" "
-        << "--guidance-bonus-threshold " << guided_frontend_bonus_threshold_ << " ";
+        << "--guidance-bonus-threshold " << guided_frontend_bonus_threshold_ << " "
+        << "--clearance-weight " << guided_frontend_clearance_weight_ << " "
+        << "--clearance-safe-distance " << guided_frontend_clearance_safe_distance_ << " "
+        << "--clearance-power " << guided_frontend_clearance_power_ << " "
+        << "--clearance-integration-mode " << "\""
+        << guided_frontend_clearance_integration_mode_ << "\" ";
     if (guided_frontend_allow_corner_cut_) {
         cmd << "--allow-corner-cut ";
     }
@@ -298,13 +334,7 @@ bool HybridAStarFlow::PlanWithTransformerGuidedAstarOnnx(
     goal_xy.x() = std::min(std::max(goal_xy.x(), 0), grid_obstacle_width_ - 1);
     goal_xy.y() = std::min(std::max(goal_xy.y(), 0), grid_obstacle_height_ - 1);
 
-    std::vector<int> occupancy_row_major;
-    occupancy_row_major.reserve(static_cast<std::size_t>(grid_obstacle_width_ * grid_obstacle_height_));
-    for (int y = 0; y < grid_obstacle_height_; ++y) {
-        for (int x = 0; x < grid_obstacle_width_; ++x) {
-            occupancy_row_major.push_back(grid_static_occupancy[x][y]);
-        }
-    }
+    const std::vector<int>& occupancy_row_major = GetGuidedFrontendOccupancyRowMajor();
 
     std::vector<float> guidance_cost;
     try {
@@ -327,6 +357,10 @@ bool HybridAStarFlow::PlanWithTransformerGuidedAstarOnnx(
     astar_options.heuristic_mode = guided_frontend_heuristic_mode_;
     astar_options.guidance_integration_mode = guided_frontend_integration_mode_;
     astar_options.guidance_bonus_threshold = guided_frontend_bonus_threshold_;
+    astar_options.clearance_weight = guided_frontend_clearance_weight_;
+    astar_options.clearance_safe_distance = guided_frontend_clearance_safe_distance_;
+    astar_options.clearance_power = guided_frontend_clearance_power_;
+    astar_options.clearance_integration_mode = guided_frontend_clearance_integration_mode_;
     astar_options.allow_corner_cut = guided_frontend_allow_corner_cut_;
 
     guided_frontend::GridAstarResult search_result = guided_frontend::RunGuidedGridAstar(
@@ -494,6 +528,7 @@ void HybridAStarFlow::Run(ros::NodeHandle &nh,planning_msgs::car_scene &car_scen
     if (HasGoalPose()){
         InitPoseData();
         grid_static_occupancy=grid_static_occupancy_map;
+        InvalidateGuidedFrontendOccupancyCache();
         // std::cout<<"持续运行中！！！"<<std::endl;
         double goal_yaw = tf::getYaw(current_goal_pose_ptr_->pose.orientation);
 
@@ -533,6 +568,7 @@ void HybridAStarFlow::Run(ros::NodeHandle &nh,planning_msgs::car_scene &car_scen
         std::cout<<"重规划！！！"<<std::endl;
         car_scene.task_type=10;
         updateOccupancyHybridAStar(nh);
+        InvalidateGuidedFrontendOccupancyCache();
         for (unsigned int w = 0; w < grid_obstacle_width_; ++w) {
             for (unsigned int h = 0; h < grid_obstacle_height_; ++h) {
                 if (grid_static_occupancy[w][h]) {
@@ -1023,6 +1059,7 @@ void HybridAStarFlow::InitStaticMap()
         }
     }
     grid_static_occupancy_map=grid_static_occupancy;
+    InvalidateGuidedFrontendOccupancyCache();
     clock_t time_end2 = clock();
     double time_diff2 = static_cast<double>(time_end2 - time_start) / CLOCKS_PER_SEC;
     std::cout<<"InitStaticMap加载耗时ms："<<time_diff2<<std::endl;
@@ -1078,6 +1115,7 @@ bool HybridAStarFlow::InitStaticMapFromOccupancyGrid()
         }
     }
     grid_static_occupancy_map = grid_static_occupancy;
+    InvalidateGuidedFrontendOccupancyCache();
 
     clock_t time_end = clock();
     double time_diff = static_cast<double>(time_end - time_start) / CLOCKS_PER_SEC;

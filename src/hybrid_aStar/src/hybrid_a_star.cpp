@@ -5,10 +5,12 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <map>
 #include <set>
+#include <sstream>
 #include <string>
 
 namespace {
@@ -26,6 +28,74 @@ double NormalizeAngleDiff(double angle) {
         angle += 2.0 * M_PI;
     }
     return angle;
+}
+
+std::vector<Vec2d> ReadOverrideSplitPointsCsv(const std::string& csv_path) {
+    std::vector<Vec2d> points;
+    std::ifstream in(csv_path);
+    if (!in.is_open()) {
+        std::cerr << "[split-override] failed to open csv: " << csv_path << std::endl;
+        return points;
+    }
+    std::string line;
+    bool first_line = true;
+    while (std::getline(in, line)) {
+        if (line.empty()) {
+            continue;
+        }
+        if (first_line) {
+            first_line = false;
+            if (line.find("x") != std::string::npos) {
+                continue;
+            }
+        }
+        std::stringstream ss(line);
+        std::string token;
+        std::vector<std::string> fields;
+        while (std::getline(ss, token, ',')) {
+            fields.push_back(token);
+        }
+        if (fields.size() < 3) {
+            continue;
+        }
+        try {
+            points.emplace_back(std::stod(fields[1]), std::stod(fields[2]));
+        } catch (const std::exception&) {
+            continue;
+        }
+    }
+    return points;
+}
+
+std::vector<int> MatchOverrideSplitIndices(const VectorVec4d& path, const std::vector<Vec2d>& override_points,
+                                           double max_match_dist) {
+    std::vector<int> matched;
+    if (path.size() < 3 || override_points.empty()) {
+        return matched;
+    }
+
+    for (const auto& override_pt : override_points) {
+        int best_idx = -1;
+        double best_dist = std::numeric_limits<double>::max();
+        for (int i = 0; i < static_cast<int>(path.size()); ++i) {
+            const double dist = (path[i].head(2) - override_pt).norm();
+            if (dist < best_dist) {
+                best_dist = dist;
+                best_idx = i;
+            }
+        }
+        if (best_idx <= 0 || best_idx >= static_cast<int>(path.size()) - 1) {
+            continue;
+        }
+        if (best_dist > max_match_dist) {
+            continue;
+        }
+        matched.push_back(best_idx);
+    }
+
+    std::sort(matched.begin(), matched.end());
+    matched.erase(std::unique(matched.begin(), matched.end()), matched.end());
+    return matched;
 }
 
 }  // namespace
@@ -991,7 +1061,8 @@ VectorVec4d HybridAStar::Smooth(VectorVec4d &path)
     std::vector<SegmentInfo> segment_infos;
     std::vector<VectorVec4d> direction_segments = PathSegmentsByDirection(path);
     int global_offset = 0;
-    const int overlap_points = std::max(2, static_cast<int>(std::ceil(0.4 / std::max(0.1, MAP_GRID_RESOLUTION_))));
+    const int overlap_points = 3;
+    const int shared_tail_points = overlap_points;
     for (const auto& direction_segment : direction_segments) {
         const int seg_size = static_cast<int>(direction_segment.size());
         if (seg_size == 0) {
@@ -1015,10 +1086,9 @@ VectorVec4d HybridAStar::Smooth(VectorVec4d &path)
             if (base_end - base_start < 1) {
                 continue;
             }
-            const int expand_start = std::max(0, base_start - (seg_idx > 0 ? overlap_points : 0));
-            const int expand_end =
-                std::min(seg_size - 1,
-                         base_end + (seg_idx + 1 < boundaries.size() - 1 ? overlap_points : 0));
+            const int expand_start =
+                std::max(0, base_start - (seg_idx > 0 ? (shared_tail_points - 1) : 0));
+            const int expand_end = base_end;
             SegmentInfo info;
             info.segment = VectorVec4d(direction_segment.begin() + expand_start,
                                        direction_segment.begin() + expand_end + 1);
@@ -1072,6 +1142,19 @@ VectorVec4d HybridAStar::Smooth(VectorVec4d &path)
             path_segment_lengths.back() < 0.8 * nominal_interval_length;
         const int tail_relaxed_curvature_constraints =
             has_short_tail ? std::min(2, PathPointsNum - 2) : 0;
+        const VectorVec4d* prev_smoothed_segment = nullptr;
+        int overlap_count = 0;
+        int hard_bind_points = 0;
+        int prev_overlap_start = 0;
+        if (pathNumber > 0 && !smoothed_paths.empty()) {
+            prev_smoothed_segment = &smoothed_paths.back();
+            overlap_count =
+                std::max(0, segment_infos[pathNumber - 1].expand_end - segment_infos[pathNumber].expand_start + 1);
+            overlap_count = std::min(overlap_count,
+                                     std::min(PathPointsNum, static_cast<int>(prev_smoothed_segment->size())));
+            hard_bind_points = std::min(2, overlap_count);
+            prev_overlap_start = static_cast<int>(prev_smoothed_segment->size()) - overlap_count;
+        }
         const int num_of_pos_variables_ = PathPointsNum * 2;                            //2*n
         const int num_of_slack_variables_ = PathPointsNum - 2;                          //n-2
         const int num_of_variables_ = num_of_pos_variables_ + num_of_slack_variables_;  //3n-2
@@ -1079,14 +1162,21 @@ VectorVec4d HybridAStar::Smooth(VectorVec4d &path)
         const int num_of_variable_constraints_ = num_of_variables_;   //3n-2
         const int num_of_curvature_constraints_ = PathPointsNum - 2;  //n-2
         const int num_of_constraints_expectStartEnd =num_of_variable_constraints_ + num_of_curvature_constraints_ ; //4n-4
-        // Keep only endpoint position locks here. Segment tangent continuity is
-        // handled later by the seam blending pass, which is less aggressive
-        // than hard tangent constraints inside each SQP subproblem.
+        // Keep endpoint position locks as hard constraints. For later segments,
+        // the first few overlap points are hard-bound to the previous optimized
+        // segment, and tangent / second-difference continuity terms regularize
+        // the local connection without any post-hoc seam interpolation.
         const int endpoint_lock_points = 1;
         const int endpoint_constraint_half = endpoint_lock_points * 2;
         const int endpoint_constraint_count = endpoint_constraint_half * 2;
         const int num_of_constraints_ = num_of_constraints_expectStartEnd + endpoint_constraint_count;
-        const double w_smooth = 3e6;const  double w_length = 10;const  double w_ref = 1; //各部分权重
+        const double w_smooth = 3e6;
+        const double w_length = 10;
+        const double w_ref = 1;
+        const double w_endpoint_heading = fix_endpoint_heading_ ? 5e4 : 0.0;
+        const double w_endpoint_curvature = fix_endpoint_heading_ ? 1.5e5 : 0.0;
+        const double w_connection_tangent = 2e4;
+        const double w_connection_curvature = 1e5;
 
                 //ref初始化
         Eigen::VectorXd referenceline   = Eigen::VectorXd::Zero(2*PathPointsNum);  //2n
@@ -1146,14 +1236,20 @@ VectorVec4d HybridAStar::Smooth(VectorVec4d &path)
             Eigen::VectorXd ub = Eigen::VectorXd::Zero(num_of_constraints_);
 
             int pen_itr = 0;
-            double initial_w_slack = 5e5;
+            double w_slack = 5e5;
+            if (const char* w_slack_env = std::getenv("HYBRID_ASTAR_W_SLACK_INIT")) {
+                try {
+                    w_slack = std::max(1e-9, std::stod(w_slack_env));
+                } catch (...) {
+                    w_slack = 5e5;
+                }
+            }
             if (const char* w_slack_env = std::getenv("HYBRID_ASTAR_INITIAL_W_SLACK")) {
                 const double parsed_w_slack = std::atof(w_slack_env);
                 if (std::isfinite(parsed_w_slack) && parsed_w_slack > 0.0) {
-                    initial_w_slack = parsed_w_slack;
+                    w_slack = parsed_w_slack;
                 }
             }
-            double w_slack=initial_w_slack;
             int sqp_num=0;
             while (pen_itr<sqp_pen_max_iter_)
             {
@@ -1179,10 +1275,18 @@ VectorVec4d HybridAStar::Smooth(VectorVec4d &path)
                         int now_num=2*i;
                         f(now_num)      = -2 * w_ref * referenceline_x(i);
                         f(now_num + 1)  = -2 * w_ref * referenceline_y(i);
-                        lb(now_num)     = referenceline_x(i) + dynamic_lb(now_num);
-                        ub(now_num)     = referenceline_x(i) + dynamic_ub(now_num);
-                        lb(now_num + 1) = referenceline_y(i) + dynamic_lb(now_num+1);
-                        ub(now_num + 1) = referenceline_y(i) + dynamic_ub(now_num+1);
+                        if (prev_smoothed_segment != nullptr && i < hard_bind_points) {
+                            const auto& bind_pose = (*prev_smoothed_segment)[prev_overlap_start + i];
+                            lb(now_num) = bind_pose.x();
+                            ub(now_num) = bind_pose.x();
+                            lb(now_num + 1) = bind_pose.y();
+                            ub(now_num + 1) = bind_pose.y();
+                        } else {
+                            lb(now_num)     = referenceline_x(i) + dynamic_lb(now_num);
+                            ub(now_num)     = referenceline_x(i) + dynamic_ub(now_num);
+                            lb(now_num + 1) = referenceline_y(i) + dynamic_lb(now_num+1);
+                            ub(now_num + 1) = referenceline_y(i) + dynamic_ub(now_num+1);
+                        }
                     }
 
                     for (int i = 0; i < num_of_slack_variables_; i++)
@@ -1260,10 +1364,18 @@ VectorVec4d HybridAStar::Smooth(VectorVec4d &path)
                         // if (RawPath.size()<2) //只有一段，起点终点约束为参考点
                         // {
                             // std::cout<<"pathNumber:"<<pathNumber+1<<"/"<<RawPath.size()<<" 只有一段!!"<<std::endl;
-                            lb(num_of_constraints_expectStartEnd + i) = referenceline_x(point_num_now);
-                            ub(num_of_constraints_expectStartEnd + i) = referenceline_x(point_num_now);
-                            lb(num_of_constraints_expectStartEnd + i + 1) = referenceline_y(point_num_now);
-                            ub(num_of_constraints_expectStartEnd + i + 1) = referenceline_y(point_num_now);
+                            if (prev_smoothed_segment != nullptr && point_num_now < hard_bind_points) {
+                                const auto& bind_pose = (*prev_smoothed_segment)[prev_overlap_start + point_num_now];
+                                lb(num_of_constraints_expectStartEnd + i) = bind_pose.x();
+                                ub(num_of_constraints_expectStartEnd + i) = bind_pose.x();
+                                lb(num_of_constraints_expectStartEnd + i + 1) = bind_pose.y();
+                                ub(num_of_constraints_expectStartEnd + i + 1) = bind_pose.y();
+                            } else {
+                                lb(num_of_constraints_expectStartEnd + i) = referenceline_x(point_num_now);
+                                ub(num_of_constraints_expectStartEnd + i) = referenceline_x(point_num_now);
+                                lb(num_of_constraints_expectStartEnd + i + 1) = referenceline_y(point_num_now);
+                                ub(num_of_constraints_expectStartEnd + i + 1) = referenceline_y(point_num_now);
+                            }
 
                             lb(num_of_constraints_expectStartEnd + endpoint_constraint_half + i) =
                                 referenceline_x(end_point_index);
@@ -1341,6 +1453,109 @@ VectorVec4d HybridAStar::Smooth(VectorVec4d &path)
                     std::cout << std::endl; // 每打印一行后换行
                     // std::cout<<" -- 求解中 -- "<<std::endl;
                     H = 2 * (w_smooth * A1.transpose() * A1 + w_length * A2.transpose() * A2 + w_ref * A3);
+
+                    auto add_soft_linear_tracking = [&](const std::vector<std::pair<int, double>>& terms,
+                                                        double target,
+                                                        double weight) {
+                        if (weight <= 0.0 || terms.empty()) {
+                            return;
+                        }
+                        for (const auto& term_i : terms) {
+                            const int row = term_i.first;
+                            const double coeff_i = term_i.second;
+                            f(row) += -2.0 * weight * target * coeff_i;
+                            for (const auto& term_j : terms) {
+                                const int col = term_j.first;
+                                const double coeff_j = term_j.second;
+                                H(row, col) += 2.0 * weight * coeff_i * coeff_j;
+                            }
+                        }
+                    };
+
+                    if (w_endpoint_heading > 0.0 && PathPointsNum >= 3) {
+                        const Vec2d end_ref_tangent =
+                            RawPath[pathNumber][PathPointsNum - 1].head(2) -
+                            RawPath[pathNumber][PathPointsNum - 2].head(2);
+                        if (hard_bind_points == 0) {
+                            const Vec2d start_ref_tangent =
+                                RawPath[pathNumber][1].head(2) - RawPath[pathNumber][0].head(2);
+                            add_soft_linear_tracking({{0, -1.0}, {2, 1.0}},
+                                                     start_ref_tangent.x(),
+                                                     w_endpoint_heading);
+                            add_soft_linear_tracking({{1, -1.0}, {3, 1.0}},
+                                                     start_ref_tangent.y(),
+                                                     w_endpoint_heading);
+                        }
+
+                        const int end_prev_x = 2 * (PathPointsNum - 2);
+                        const int end_prev_y = end_prev_x + 1;
+                        const int end_last_x = 2 * (PathPointsNum - 1);
+                        const int end_last_y = end_last_x + 1;
+                        add_soft_linear_tracking({{end_prev_x, -1.0}, {end_last_x, 1.0}},
+                                                 end_ref_tangent.x(),
+                                                 w_endpoint_heading);
+                        add_soft_linear_tracking({{end_prev_y, -1.0}, {end_last_y, 1.0}},
+                                                 end_ref_tangent.y(),
+                                                 w_endpoint_heading);
+                    }
+
+                    if (w_endpoint_curvature > 0.0 && PathPointsNum >= 4) {
+                        const Vec2d end_ref_curvature =
+                            RawPath[pathNumber][PathPointsNum - 1].head(2) -
+                            2.0 * RawPath[pathNumber][PathPointsNum - 2].head(2) +
+                            RawPath[pathNumber][PathPointsNum - 3].head(2);
+                        if (hard_bind_points == 0) {
+                            const Vec2d start_ref_curvature =
+                                RawPath[pathNumber][2].head(2) -
+                                2.0 * RawPath[pathNumber][1].head(2) +
+                                RawPath[pathNumber][0].head(2);
+                            add_soft_linear_tracking({{0, 1.0}, {2, -2.0}, {4, 1.0}},
+                                                     start_ref_curvature.x(),
+                                                     w_endpoint_curvature);
+                            add_soft_linear_tracking({{1, 1.0}, {3, -2.0}, {5, 1.0}},
+                                                     start_ref_curvature.y(),
+                                                     w_endpoint_curvature);
+                        }
+
+                        const int end_prev2_x = 2 * (PathPointsNum - 3);
+                        const int end_prev2_y = end_prev2_x + 1;
+                        const int end_prev_x = 2 * (PathPointsNum - 2);
+                        const int end_prev_y = end_prev_x + 1;
+                        const int end_last_x = 2 * (PathPointsNum - 1);
+                        const int end_last_y = end_last_x + 1;
+                        add_soft_linear_tracking({{end_prev2_x, 1.0}, {end_prev_x, -2.0}, {end_last_x, 1.0}},
+                                                 end_ref_curvature.x(),
+                                                 w_endpoint_curvature);
+                        add_soft_linear_tracking({{end_prev2_y, 1.0}, {end_prev_y, -2.0}, {end_last_y, 1.0}},
+                                                 end_ref_curvature.y(),
+                                                 w_endpoint_curvature);
+                    }
+
+                    if (pathNumber > 0 && PathPointsNum >= 3 && !smoothed_paths.empty()) {
+                        const auto& prev_segment = smoothed_paths.back();
+                        const auto& prev_info = segment_infos[pathNumber - 1];
+                        const auto& curr_info = segment_infos[pathNumber];
+                        int overlap_count = std::max(0, prev_info.expand_end - curr_info.expand_start + 1);
+                        overlap_count = std::min(overlap_count,
+                                                 std::min(static_cast<int>(prev_segment.size()), PathPointsNum));
+                        if (overlap_count >= 3) {
+                            const int prev_overlap_start = static_cast<int>(prev_segment.size()) - overlap_count;
+                            const Vec2d prev_p0 = prev_segment[prev_overlap_start].head(2);
+                            const Vec2d prev_p1 = prev_segment[prev_overlap_start + 1].head(2);
+                            const Vec2d prev_p2 = prev_segment[prev_overlap_start + 2].head(2);
+                            const Vec2d tangent_ref = prev_p1 - prev_p0;
+                            const Vec2d curvature_ref = prev_p2 - 2.0 * prev_p1 + prev_p0;
+
+                            add_soft_linear_tracking({{0, -1.0}, {2, 1.0}}, tangent_ref.x(), w_connection_tangent);
+                            add_soft_linear_tracking({{1, -1.0}, {3, 1.0}}, tangent_ref.y(), w_connection_tangent);
+                            add_soft_linear_tracking({{0, 1.0}, {2, -2.0}, {4, 1.0}},
+                                                     curvature_ref.x(),
+                                                     w_connection_curvature);
+                            add_soft_linear_tracking({{1, 1.0}, {3, -2.0}, {5, 1.0}},
+                                                     curvature_ref.y(),
+                                                     w_connection_curvature);
+                        }
+                    }
                     
                     // for (int i = 0; i < H.rows(); ++i) {
                     //     for (int j = 0; j < H.cols(); ++j) {
@@ -1559,9 +1774,7 @@ VectorVec4d HybridAStar::Smooth(VectorVec4d &path)
        
     }  //while path_num end
     std::cout<<"END!!!"<<std::endl;
-    // GetPathYaw(smoothed_paths);
     VectorVec4d return_smoothed_path;
-    std::vector<int> seam_indices;
     if (!smoothed_paths.empty()) {
         return_smoothed_path = smoothed_paths.front();
         for (size_t seg_idx = 1; seg_idx < smoothed_paths.size(); ++seg_idx) {
@@ -1571,24 +1784,12 @@ VectorVec4d HybridAStar::Smooth(VectorVec4d &path)
                 std::min(overlap_count,
                          std::min(static_cast<int>(return_smoothed_path.size()),
                                   static_cast<int>(smoothed_paths[seg_idx].size())));
-            if (clamped_overlap > 0) {
-                const int overlap_start_idx = static_cast<int>(return_smoothed_path.size()) - clamped_overlap;
-                for (int k = 0; k < clamped_overlap; ++k) {
-                    const double alpha =
-                        (clamped_overlap == 1) ? 0.5 : static_cast<double>(k) / static_cast<double>(clamped_overlap - 1);
-                    return_smoothed_path[overlap_start_idx + k].x() =
-                        (1.0 - alpha) * return_smoothed_path[overlap_start_idx + k].x() +
-                        alpha * smoothed_paths[seg_idx][k].x();
-                    return_smoothed_path[overlap_start_idx + k].y() =
-                        (1.0 - alpha) * return_smoothed_path[overlap_start_idx + k].y() +
-                        alpha * smoothed_paths[seg_idx][k].y();
-                }
-                seam_indices.push_back(overlap_start_idx + clamped_overlap / 2);
-            } else if (!return_smoothed_path.empty()) {
-                seam_indices.push_back(static_cast<int>(return_smoothed_path.size()) - 1);
+            const int bound_points = std::min(2, clamped_overlap);
+            const int replaced_tail_points = std::max(0, clamped_overlap - bound_points);
+            for (int pop = 0; pop < replaced_tail_points && !return_smoothed_path.empty(); ++pop) {
+                return_smoothed_path.pop_back();
             }
-
-            for (size_t j = static_cast<size_t>(std::max(0, clamped_overlap)); j < smoothed_paths[seg_idx].size(); ++j) {
+            for (size_t j = static_cast<size_t>(std::max(0, bound_points)); j < smoothed_paths[seg_idx].size(); ++j) {
                 if (!return_smoothed_path.empty()) {
                     const auto& prev = return_smoothed_path.back();
                     const auto& curr = smoothed_paths[seg_idx][j];
@@ -1600,7 +1801,6 @@ VectorVec4d HybridAStar::Smooth(VectorVec4d &path)
             }
         }
     }
-
     auto segment_collision_free = [&](const Vec4d &a, const Vec4d &b) {
         const double dx = b.x() - a.x();
         const double dy = b.y() - a.y();
@@ -2068,16 +2268,47 @@ std::vector<int> HybridAStar::FindGeometrySplitIndices(const VectorVec4d& path) 
         return {};
     }
 
+    const char* override_csv = std::getenv("HYBRID_ASTAR_OVERRIDE_SPLIT_POINTS_CSV");
+    if (override_csv != nullptr && std::string(override_csv).size() > 0) {
+        const std::vector<Vec2d> override_points = ReadOverrideSplitPointsCsv(override_csv);
+        const std::vector<int> matched =
+            MatchOverrideSplitIndices(path, override_points, /*max_match_dist=*/2.0);
+        if (!matched.empty()) {
+            std::cout << "[split-override] using external split points from " << override_csv
+                      << " matched_indices=";
+            for (std::size_t i = 0; i < matched.size(); ++i) {
+                if (i > 0) {
+                    std::cout << ",";
+                }
+                std::cout << matched[i];
+            }
+            std::cout << std::endl;
+            return matched;
+        }
+        std::cout << "[split-override] no valid matched split index from " << override_csv << std::endl;
+    }
+
     VectorVec4d yaw_path = path;
     GetPathYaw(yaw_path);
 
-    const double heading_split_thresh = 30.0 * M_PI / 180.0;
-    const double cumulative_heading_split_thresh = 60.0 * M_PI / 180.0;
+    const char* legacy_split_env = std::getenv("HYBRID_ASTAR_USE_LEGACY_SPLITS");
+    const bool use_legacy_splits =
+        legacy_split_env != nullptr && std::string(legacy_split_env) == "1";
+
+    const double heading_split_thresh =
+        (use_legacy_splits ? 30.0 : 35.0) * M_PI / 180.0;
+    const double cumulative_heading_split_thresh =
+        (use_legacy_splits ? 60.0 : 70.0) * M_PI / 180.0;
+    const double straight_heading_thresh = 8.0 * M_PI / 180.0;
     const double narrow_enter_clearance_thresh = 1.0;
+    const double min_split_distance_m = 3.0;
+    const double straight_min_length_m = 2.5;
     const double max_clearance_probe = std::max(1.5, 8.0 * MAP_GRID_RESOLUTION_);
     const int min_segment_points = std::max(8, static_cast<int>(std::ceil(1.0 / MAP_GRID_RESOLUTION_)));
     const int narrow_min_run_points =
         std::max(4, static_cast<int>(std::ceil(0.5 / std::max(0.1, MAP_GRID_RESOLUTION_))));
+    const int straight_run_points =
+        std::max(4, static_cast<int>(std::ceil(straight_min_length_m / std::max(0.1, MAP_GRID_RESOLUTION_))));
     const bool debug_splits = std::getenv("HYBRID_ASTAR_DEBUG_SPLITS") != nullptr;
 
     std::vector<double> heading_delta(n, 0.0);
@@ -2088,6 +2319,10 @@ std::vector<int> HybridAStar::FindGeometrySplitIndices(const VectorVec4d& path) 
     for (int i = 0; i < n; ++i) {
         clearances[i] = EstimatePointClearance(yaw_path[i].head(2), max_clearance_probe);
     }
+    std::vector<double> cumulative_s(n, 0.0);
+    for (int i = 1; i < n; ++i) {
+        cumulative_s[i] = cumulative_s[i - 1] + (yaw_path[i].head(2) - yaw_path[i - 1].head(2)).norm();
+    }
 
     std::set<int> candidates;
     std::map<int, std::vector<std::string>> candidate_reasons;
@@ -2097,22 +2332,71 @@ std::vector<int> HybridAStar::FindGeometrySplitIndices(const VectorVec4d& path) 
             candidate_reasons[idx].push_back(reason);
         }
     };
-    for (int i = 2; i < n - 2; ++i) {
-        if (std::abs(heading_delta[i]) >= heading_split_thresh) {
-            add_candidate(i, "single_heading");
+    if (use_legacy_splits) {
+        for (int i = 2; i < n - 2; ++i) {
+            if (std::abs(heading_delta[i]) >= heading_split_thresh) {
+                add_candidate(i, "heading_jump_legacy");
+            }
         }
-    }
+        int last_heading_anchor = 0;
+        for (int i = 1; i < n - 1; ++i) {
+            if (i - last_heading_anchor < min_segment_points) {
+                continue;
+            }
+            const double yaw_from_anchor =
+                NormalizeAngleDiff(yaw_path[i].z() - yaw_path[last_heading_anchor].z());
+            if (std::abs(yaw_from_anchor) >= cumulative_heading_split_thresh) {
+                add_candidate(i, "cumulative_heading_legacy");
+                last_heading_anchor = i;
+            }
+        }
+    } else {
+        std::vector<int> angle_triggers;
+        for (int i = 2; i < n - 2; ++i) {
+            if (std::abs(heading_delta[i]) >= heading_split_thresh) {
+                angle_triggers.push_back(i);
+            }
+        }
 
-    int last_heading_anchor = 0;
-    for (int i = 1; i < n - 1; ++i) {
-        if (i - last_heading_anchor < min_segment_points) {
-            continue;
+        int last_heading_anchor = 0;
+        for (int i = 1; i < n - 1; ++i) {
+            if (i - last_heading_anchor < min_segment_points) {
+                continue;
+            }
+            const double yaw_from_anchor =
+                NormalizeAngleDiff(yaw_path[i].z() - yaw_path[last_heading_anchor].z());
+            if (std::abs(yaw_from_anchor) >= cumulative_heading_split_thresh) {
+                angle_triggers.push_back(i);
+                last_heading_anchor = i;
+            }
         }
-        const double yaw_from_anchor =
-            NormalizeAngleDiff(yaw_path[i].z() - yaw_path[last_heading_anchor].z());
-        if (std::abs(yaw_from_anchor) >= cumulative_heading_split_thresh) {
-            add_candidate(i, "cumulative_heading");
-            last_heading_anchor = i;
+        std::sort(angle_triggers.begin(), angle_triggers.end());
+        angle_triggers.erase(std::unique(angle_triggers.begin(), angle_triggers.end()), angle_triggers.end());
+
+        for (const int trigger_idx : angle_triggers) {
+            int best_split_idx = -1;
+            int straight_run = 0;
+            int straight_start_idx = -1;
+            for (int j = trigger_idx + 1; j < n - 1; ++j) {
+                if (std::abs(heading_delta[j]) < straight_heading_thresh) {
+                    if (straight_run == 0) {
+                        straight_start_idx = j;
+                    }
+                    ++straight_run;
+                } else {
+                    straight_run = 0;
+                    straight_start_idx = -1;
+                }
+                if (straight_start_idx > 0 &&
+                    straight_run >= straight_run_points &&
+                    cumulative_s[j] - cumulative_s[straight_start_idx] >= straight_min_length_m) {
+                    best_split_idx = j;
+                    break;
+                }
+            }
+            if (best_split_idx > 0 && best_split_idx < n - 1) {
+                add_candidate(best_split_idx, "post_turn_straight");
+            }
         }
     }
 
@@ -2159,14 +2443,33 @@ std::vector<int> HybridAStar::FindGeometrySplitIndices(const VectorVec4d& path) 
         if (!filtered.empty() && idx - filtered.back() < (min_segment_points - 1)) {
             continue;
         }
+        if (!filtered.empty() &&
+            cumulative_s[idx] - cumulative_s[filtered.back()] < min_split_distance_m) {
+            continue;
+        }
         filtered.push_back(idx);
     }
     if (!filtered.empty() && n - filtered.back() < min_segment_points) {
         filtered.pop_back();
     }
+    if (!filtered.empty() &&
+        cumulative_s.back() - cumulative_s[filtered.back()] < min_split_distance_m) {
+        filtered.pop_back();
+    }
+    const char* drop_last_split_env = std::getenv("HYBRID_ASTAR_DROP_LAST_SPLIT_POINT");
+    if (drop_last_split_env != nullptr && std::string(drop_last_split_env) == "1" && !filtered.empty()) {
+        filtered.pop_back();
+    }
     if (debug_splits) {
         std::cout << "[split-debug] n=" << n
-                  << " heading_deg=30 cumulative_deg=60 narrow_enter=" << narrow_enter_clearance_thresh
+                  << " legacy=" << (use_legacy_splits ? 1 : 0)
+                  << " heading_deg=" << heading_split_thresh * 180.0 / M_PI
+                  << " cumulative_deg=" << cumulative_heading_split_thresh * 180.0 / M_PI
+                  << " straight_deg=8"
+                  << " straight_min_length_m=" << straight_min_length_m
+                  << " straight_run_points=" << straight_run_points
+                  << " narrow_enter=" << narrow_enter_clearance_thresh
+                  << " min_split_distance_m=" << min_split_distance_m
                   << " narrow_run=" << narrow_min_run_points
                   << " min_segment_points=" << min_segment_points << std::endl;
         for (const int idx : filtered) {
@@ -2231,7 +2534,7 @@ std::vector<VectorVec4d> HybridAStar::SplitSegmentByGeometry(const VectorVec4d& 
 double HybridAStar::CalculateConstraintViolation(const Eigen::VectorXd &points,int PathPointsNum,double curvature_constraint_sqr) {
 
   double max_cviolation = 0.0;
-  for (int index = 3; index < PathPointsNum-3; index++) {  //TODO：因为前三个点是固定的  //可能会有BUG？待验证 //down
+  for (int index = 1; index < PathPointsNum-1; index++) {
         double x_f = points[2*(index-1)];
         double x_m = points[2*index];
         double x_l = points[2*(index+1)];

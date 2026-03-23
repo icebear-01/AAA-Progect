@@ -40,6 +40,10 @@
         <param name="planner/guided_frontend_heuristic_mode" value="octile"/>
         <param name="planner/guided_frontend_integration_mode" value="g_cost"/>
         <param name="planner/guided_frontend_bonus_threshold" value="0.5"/>
+        <param name="planner/guided_frontend_clearance_weight" value="0.0"/>
+        <param name="planner/guided_frontend_clearance_safe_distance" value="0.0"/>
+        <param name="planner/guided_frontend_clearance_power" value="2.0"/>
+        <param name="planner/guided_frontend_clearance_integration_mode" value="g_cost"/>
         <param name="planner/guided_frontend_allow_corner_cut" value="false"/>
         <param name="planner/guided_frontend_invert_guidance_cost" value="false"/>
     </node>

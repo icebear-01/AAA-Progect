@@ -92,6 +92,8 @@ private:
     void PublishPlanningOutputs(const VectorVec4d &path_original, const VectorVec4d &path_smoothed);
 
     bool InitStaticMapFromOccupancyGrid();
+    void InvalidateGuidedFrontendOccupancyCache();
+    const std::vector<int>& GetGuidedFrontendOccupancyRowMajor();
 
 private:
     std::shared_ptr<HybridAStar> kinodynamic_astar_searcher_ptr_;
@@ -155,6 +157,10 @@ private:
     std::string guided_frontend_heuristic_mode_{"octile"};
     std::string guided_frontend_integration_mode_{"g_cost"};
     double guided_frontend_bonus_threshold_{0.5};
+    double guided_frontend_clearance_weight_{0.0};
+    double guided_frontend_clearance_safe_distance_{0.0};
+    double guided_frontend_clearance_power_{2.0};
+    std::string guided_frontend_clearance_integration_mode_{"g_cost"};
     bool guided_frontend_allow_corner_cut_{false};
     bool guided_frontend_invert_guidance_cost_{false};
     int guided_frontend_onnx_intra_threads_{1};
@@ -165,6 +171,8 @@ private:
     bool static_map_fallback_to_pcd_{true};
 
     std::unique_ptr<guided_frontend::GuidanceCostMapOnnx> guided_frontend_onnx_;
+    std::vector<int> guided_frontend_occupancy_row_major_;
+    bool guided_frontend_occupancy_row_major_valid_{false};
 
     ros::Time timestamp_;
 
