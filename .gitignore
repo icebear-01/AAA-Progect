@@ -1,0 +1,21 @@
+# Build outputs
+build/
+build_*/
+devel/
+cmake-build-*/
+CMakeFiles/
+
+# Logs and runtime files
+*.log
+logs/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Experiment / benchmark outputs
+offline_results/
+benchmark_results_paper_res/
+
+# Local temporary workdirs
+tmp_saved*/

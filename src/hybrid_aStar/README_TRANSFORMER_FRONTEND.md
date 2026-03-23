@@ -28,11 +28,13 @@ the predicted cost map back to the live planning grid.
 Example:
 
 ```bash
-PYTHONPATH=/home/wmd/elevator_car/P2P_fast_env_origin/src/planning/src/hybrid_aStar/model_base_astar/neural-astar/src:$PYTHONPATH \
+export HYBRID_ASTAR_ROOT=/home/wmd/elevetor_demo0317/AAA-Progect/src/hybrid_aStar
+
+PYTHONPATH=$HYBRID_ASTAR_ROOT/model_base_astar/neural-astar/src:$PYTHONPATH \
 /path/to/python_with_torch \
-/home/wmd/elevator_car/P2P_fast_env_origin/src/planning/src/hybrid_aStar/model_base_astar/neural-astar/scripts/export_guidance_encoder_onnx.py \
-  --ckpt /home/wmd/elevator_car/P2P_fast_env_origin/src/planning/src/hybrid_aStar/model_base_astar/neural-astar/outputs/model_guidance_grid_mpd_unet_transformer_v3_gatedskip_formal_v1/best.pt \
-  --out /home/wmd/elevator_car/P2P_fast_env_origin/src/planning/src/hybrid_aStar/model_base_astar/neural-astar/outputs/model_guidance_grid_mpd_unet_transformer_v3_gatedskip_formal_v1/best_cost_map.onnx \
+$HYBRID_ASTAR_ROOT/model_base_astar/neural-astar/scripts/export_guidance_encoder_onnx.py \
+  --ckpt $HYBRID_ASTAR_ROOT/model_base_astar/neural-astar/outputs/model_guidance_grid_mpd_unet_transformer_v3_gatedskip_formal_v1/best.pt \
+  --out $HYBRID_ASTAR_ROOT/model_base_astar/neural-astar/outputs/model_guidance_grid_mpd_unet_transformer_v3_gatedskip_formal_v1/best_cost_map.onnx \
   --device cpu \
   --height 64 \
   --width 64 \
@@ -43,9 +45,9 @@ PYTHONPATH=/home/wmd/elevator_car/P2P_fast_env_origin/src/planning/src/hybrid_aS
 
 ```bash
 source /opt/ros/noetic/setup.bash
-source /home/wmd/elevator_car/P2P_fast_env_origin/devel/setup.bash
+source /home/wmd/elevetor_demo0317/AAA-Progect/build_hybrid_astar/devel/setup.bash
 
-roslaunch /home/wmd/elevator_car/P2P_fast_env_origin/src/planning/src/hybrid_aStar/launch/run_hybrid_a_star.launch \
+roslaunch /home/wmd/elevetor_demo0317/AAA-Progect/src/hybrid_aStar/launch/run_hybrid_a_star.launch \
   planner/use_transformer_guided_frontend:=true \
   planner/guided_frontend_backend:=onnx
 ```

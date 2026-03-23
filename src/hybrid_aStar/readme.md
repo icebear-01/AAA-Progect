@@ -1,5 +1,12 @@
 # hybrid_aStar
 
+Current local project root:
+
+```bash
+export HYBRID_ASTAR_ROOT=/home/wmd/elevetor_demo0317/AAA-Progect/src/hybrid_aStar
+export AAA_PROJECT_ROOT=/home/wmd/elevetor_demo0317/AAA-Progect
+```
+
 ## Overview
 
 This package now supports two frontends and one shared backend:
@@ -19,10 +26,11 @@ Current main flow:
 ## Build
 
 ```bash
-cd /home/wmd/elevator_car/P2P_fast_env_origin
+cd /home/wmd/elevetor_demo0317/AAA-Progect
 source /opt/ros/noetic/setup.bash
-catkin_make --pkg hybrid_a_star
-source devel/setup.bash
+# This workspace currently uses the existing build_hybrid_astar output.
+# Rebuild with your local catkin workflow if needed.
+source build_hybrid_astar/devel/setup.bash
 ```
 
 Notes:
@@ -34,9 +42,9 @@ Notes:
 
 ```bash
 source /opt/ros/noetic/setup.bash
-source /home/wmd/elevator_car/P2P_fast_env_origin/devel/setup.bash
+source /home/wmd/elevetor_demo0317/AAA-Progect/build_hybrid_astar/devel/setup.bash
 
-roslaunch /home/wmd/elevator_car/P2P_fast_env_origin/src/planning/src/hybrid_aStar/launch/run_hybrid_a_star.launch
+roslaunch /home/wmd/elevetor_demo0317/AAA-Progect/src/hybrid_aStar/launch/run_hybrid_a_star.launch
 ```
 
 Default behavior:
@@ -52,9 +60,9 @@ back to C++ for smoothing.
 
 ```bash
 source /opt/ros/noetic/setup.bash
-source /home/wmd/elevator_car/P2P_fast_env_origin/devel/setup.bash
+source /home/wmd/elevetor_demo0317/AAA-Progect/build_hybrid_astar/devel/setup.bash
 
-roslaunch /home/wmd/elevator_car/P2P_fast_env_origin/src/planning/src/hybrid_aStar/launch/run_hybrid_a_star.launch \
+roslaunch /home/wmd/elevetor_demo0317/AAA-Progect/src/hybrid_aStar/launch/run_hybrid_a_star.launch \
   planner/use_transformer_guided_frontend:=true \
   planner/guided_frontend_backend:=python
 ```
@@ -77,11 +85,11 @@ Use the `neural-astar-gpu` conda environment:
 ```bash
 eval "$(/home/wmd/anaconda3/bin/conda shell.bash hook)"
 conda activate neural-astar-gpu
-export PYTHONPATH=/home/wmd/elevator_car/P2P_fast_env_origin/src/planning/src/hybrid_aStar/model_base_astar/neural-astar/src:$PYTHONPATH
+export PYTHONPATH=/home/wmd/elevetor_demo0317/AAA-Progect/src/hybrid_aStar/model_base_astar/neural-astar/src:$PYTHONPATH
 
-python /home/wmd/elevator_car/P2P_fast_env_origin/src/planning/src/hybrid_aStar/model_base_astar/neural-astar/scripts/export_guidance_encoder_onnx.py \
-  --ckpt /home/wmd/elevator_car/P2P_fast_env_origin/src/planning/src/hybrid_aStar/model_base_astar/neural-astar/outputs/model_guidance_grid_mpd_unet_transformer_v3_gatedskip_formal_v1/best.pt \
-  --out /home/wmd/elevator_car/P2P_fast_env_origin/src/planning/src/hybrid_aStar/model_base_astar/neural-astar/outputs/model_guidance_grid_mpd_unet_transformer_v3_gatedskip_formal_v1/best_cost_map.onnx \
+python /home/wmd/elevetor_demo0317/AAA-Progect/src/hybrid_aStar/model_base_astar/neural-astar/scripts/export_guidance_encoder_onnx.py \
+  --ckpt /home/wmd/elevetor_demo0317/AAA-Progect/src/hybrid_aStar/model_base_astar/neural-astar/outputs/model_guidance_grid_mpd_unet_transformer_v3_gatedskip_formal_v1/best.pt \
+  --out /home/wmd/elevetor_demo0317/AAA-Progect/src/hybrid_aStar/model_base_astar/neural-astar/outputs/model_guidance_grid_mpd_unet_transformer_v3_gatedskip_formal_v1/best_cost_map.onnx \
   --device cpu \
   --height 64 \
   --width 64 \
@@ -101,9 +109,9 @@ Important implementation note:
 
 ```bash
 source /opt/ros/noetic/setup.bash
-source /home/wmd/elevator_car/P2P_fast_env_origin/devel/setup.bash
+source /home/wmd/elevetor_demo0317/AAA-Progect/build_hybrid_astar/devel/setup.bash
 
-roslaunch /home/wmd/elevator_car/P2P_fast_env_origin/src/planning/src/hybrid_aStar/launch/run_hybrid_a_star.launch \
+roslaunch /home/wmd/elevetor_demo0317/AAA-Progect/src/hybrid_aStar/launch/run_hybrid_a_star.launch \
   planner/use_transformer_guided_frontend:=true \
   planner/guided_frontend_backend:=onnx
 ```

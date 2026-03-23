@@ -1,2 +1,0 @@
-/usr/bin/ar qc librl_dp.a  CMakeFiles/rl_dp.dir/rl_dp.cpp.o
-/usr/bin/ranlib librl_dp.a

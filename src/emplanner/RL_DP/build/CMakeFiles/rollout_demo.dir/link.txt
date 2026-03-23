@@ -1,1 +1,0 @@
-/usr/bin/c++     CMakeFiles/rollout_demo.dir/cpp_rollout_visualize.cpp.o  -o rollout_demo   -L/usr/local/onnxruntime/lib  -Wl,-rpath,/usr/local/onnxruntime/lib -lonnxruntime libdp_policy.a libdp_planner.a /usr/local/onnxruntime/lib/libonnxruntime.so libdp_policy.a -lonnxruntime /usr/lib/x86_64-linux-gnu/libpython3.8.so 

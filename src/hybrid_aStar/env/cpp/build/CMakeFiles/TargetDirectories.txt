@@ -1,4 +1,0 @@
-/home/wmd/AAA-progect/parking_HA*/Net-HA/cpp/build/CMakeFiles/rebuild_cache.dir
-/home/wmd/AAA-progect/parking_HA*/Net-HA/cpp/build/CMakeFiles/edit_cache.dir
-/home/wmd/AAA-progect/parking_HA*/Net-HA/cpp/build/CMakeFiles/hope_preview.dir
-/home/wmd/AAA-progect/parking_HA*/Net-HA/cpp/build/CMakeFiles/hope_env.dir

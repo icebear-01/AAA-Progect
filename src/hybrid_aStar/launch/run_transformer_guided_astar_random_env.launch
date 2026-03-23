@@ -17,6 +17,10 @@
   <arg name="guided_frontend_heuristic_mode" default="octile"/>
   <arg name="guided_frontend_integration_mode" default="g_cost"/>
   <arg name="guided_frontend_bonus_threshold" default="0.5"/>
+  <arg name="guided_frontend_clearance_weight" default="0.0"/>
+  <arg name="guided_frontend_clearance_safe_distance" default="0.0"/>
+  <arg name="guided_frontend_clearance_power" default="2.0"/>
+  <arg name="guided_frontend_clearance_integration_mode" default="g_cost"/>
   <arg name="guided_frontend_allow_corner_cut" default="false"/>
   <arg name="guided_frontend_invert_guidance_cost" default="false"/>
 
@@ -68,6 +72,10 @@
     <param name="planner/guided_frontend_heuristic_mode" value="$(arg guided_frontend_heuristic_mode)"/>
     <param name="planner/guided_frontend_integration_mode" value="$(arg guided_frontend_integration_mode)"/>
     <param name="planner/guided_frontend_bonus_threshold" value="$(arg guided_frontend_bonus_threshold)"/>
+    <param name="planner/guided_frontend_clearance_weight" value="$(arg guided_frontend_clearance_weight)"/>
+    <param name="planner/guided_frontend_clearance_safe_distance" value="$(arg guided_frontend_clearance_safe_distance)"/>
+    <param name="planner/guided_frontend_clearance_power" value="$(arg guided_frontend_clearance_power)"/>
+    <param name="planner/guided_frontend_clearance_integration_mode" value="$(arg guided_frontend_clearance_integration_mode)"/>
     <param name="planner/guided_frontend_allow_corner_cut" value="$(arg guided_frontend_allow_corner_cut)"/>
     <param name="planner/guided_frontend_invert_guidance_cost" value="$(arg guided_frontend_invert_guidance_cost)"/>
   </node>

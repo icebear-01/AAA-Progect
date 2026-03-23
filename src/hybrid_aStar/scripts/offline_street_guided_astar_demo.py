@@ -19,13 +19,29 @@ import numpy as np
 import yaml
 from matplotlib.colors import ListedColormap, to_rgba
 from matplotlib import patheffects as pe
+from matplotlib import font_manager as fm
+from matplotlib.lines import Line2D
 
 
 SCRIPT_PATH = Path(__file__).resolve()
 HYBRID_ASTAR_ROOT = SCRIPT_PATH.parent.parent
-REPO_SRC_ROOT = HYBRID_ASTAR_ROOT.parent.parent.parent
+REPO_SRC_ROOT = HYBRID_ASTAR_ROOT.parent.parent
 PLOT_DPI = 600
 NEURAL_ASTAR_SRC = HYBRID_ASTAR_ROOT / "model_base_astar" / "neural-astar" / "src"
+CJK_FONT_PATH = Path("/usr/share/fonts/truetype/arphic/uming.ttc")
+
+
+def default_smoother_cli() -> Path:
+    candidates = [
+        REPO_SRC_ROOT / "build_hybrid_astar" / "devel" / "lib" / "hybrid_a_star" / "smooth_path_cli",
+        REPO_SRC_ROOT / "devel" / "lib" / "hybrid_a_star" / "smooth_path_cli",
+        REPO_SRC_ROOT.parent / "build_hybrid_astar" / "devel" / "lib" / "hybrid_a_star" / "smooth_path_cli",
+        REPO_SRC_ROOT.parent / "devel" / "lib" / "hybrid_a_star" / "smooth_path_cli",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
 
 
 def parse_args() -> argparse.Namespace:
@@ -56,7 +72,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--smoother-cli",
         type=Path,
-        default=REPO_SRC_ROOT.parent / "devel" / "lib" / "hybrid_a_star" / "smooth_path_cli",
+        default=default_smoother_cli(),
     )
     parser.add_argument(
         "--neural-astar-src",
@@ -139,6 +155,7 @@ def random_free_xy(occ: np.ndarray, rng: random.Random) -> Tuple[int, int]:
 
 def sample_problem(
     occ: np.ndarray,
+    astar_solver,
     rng: random.Random,
     min_start_goal_dist: float,
     origin_x: float,
@@ -163,7 +180,7 @@ def sample_problem(
             continue
         if math.hypot(goal_xy[0] - start_xy[0], goal_xy[1] - start_xy[1]) < min_start_goal_dist:
             continue
-        if astar_8conn(occ, start_xy, goal_xy) is None:
+        if astar_solver(occ, start_xy, goal_xy) is None:
             continue
         return start_xy, goal_xy
     raise RuntimeError("failed to sample a solvable start/goal pair")
@@ -186,6 +203,7 @@ def resolve_problem(
     if start_xy is None or goal_xy is None:
         return sample_problem(
             occ,
+            astar_solver,
             rng,
             min_start_goal_dist,
             origin_x,
@@ -404,13 +422,31 @@ def curvature_profile(path: Sequence[Tuple[float, float]], step: float = 0.10) -
     s = cumulative_arc_length([tuple(p) for p in resampled])
     x = resampled[:, 0]
     y = resampled[:, 1]
-    dx = np.gradient(x, s, edge_order=2)
-    dy = np.gradient(y, s, edge_order=2)
-    ddx = np.gradient(dx, s, edge_order=2)
-    ddy = np.gradient(dy, s, edge_order=2)
-    denom = np.maximum((dx * dx + dy * dy) ** 1.5, 1e-6)
+    edge_order = 2 if resampled.shape[0] >= 3 else 1
+    dx = np.gradient(x, s, edge_order=edge_order)
+    dy = np.gradient(y, s, edge_order=edge_order)
+    ddx = np.gradient(dx, s, edge_order=edge_order)
+    ddy = np.gradient(dy, s, edge_order=edge_order)
+    denom = np.power(dx * dx + dy * dy, 1.5)
+    denom = np.where(denom < 1e-9, np.inf, denom)
     kappa = (dx * ddy - dy * ddx) / denom
     return s, kappa
+
+
+def heading_profile(path: Sequence[Tuple[float, float]], step: float = 0.10) -> Tuple[np.ndarray, np.ndarray]:
+    if len(path) < 2:
+        return np.zeros((0,), dtype=np.float64), np.zeros((0,), dtype=np.float64)
+    resampled = np.asarray(resample_path(path, step), dtype=np.float64)
+    if resampled.shape[0] < 2:
+        return np.zeros((0,), dtype=np.float64), np.zeros((0,), dtype=np.float64)
+    s = cumulative_arc_length([tuple(p) for p in resampled])
+    x = resampled[:, 0]
+    y = resampled[:, 1]
+    edge_order = 2 if resampled.shape[0] >= 3 else 1
+    dx = np.gradient(x, s, edge_order=edge_order)
+    dy = np.gradient(y, s, edge_order=edge_order)
+    heading = np.unwrap(np.arctan2(dy, dx))
+    return s, np.rad2deg(heading)
 
 
 def project_split_points_to_arc_length(
@@ -443,6 +479,50 @@ def project_split_points_to_arc_length(
                 best_s = float(s[seg_idx] + np.linalg.norm(proj - a))
         split_s.append((idx, best_s))
     return split_s
+
+
+def interpolate_profile_to_reference(
+    s_ref: np.ndarray,
+    s_src: np.ndarray,
+    value_src: np.ndarray,
+) -> np.ndarray:
+    if s_ref.size == 0 or s_src.size == 0 or value_src.size == 0:
+        return np.zeros((0,), dtype=np.float64)
+    if s_src.size == 1:
+        return np.full_like(s_ref, float(value_src[0]), dtype=np.float64)
+    s_ref_clip = np.clip(s_ref, float(s_src[0]), float(s_src[-1]))
+    return np.interp(s_ref_clip, s_src, value_src)
+
+
+def wrap_deg_to_ref(angle_deg: np.ndarray, ref_deg: np.ndarray) -> np.ndarray:
+    if angle_deg.size == 0:
+        return angle_deg
+    if ref_deg.size == 0:
+        return ((angle_deg + 180.0) % 360.0) - 180.0
+    wrapped = ((angle_deg - ref_deg + 180.0) % 360.0) - 180.0 + ref_deg
+    return wrapped
+
+
+def shift_curve_to_branch(angle_deg: np.ndarray, target_center_deg: float) -> np.ndarray:
+    if angle_deg.size == 0:
+        return angle_deg
+    median_deg = float(np.median(angle_deg))
+    k = round((target_center_deg - median_deg) / 360.0)
+    return angle_deg + 360.0 * float(k)
+
+
+def normalize_heading_branch(angle_deg: np.ndarray, target_center_deg: float) -> np.ndarray:
+    if angle_deg.size == 0:
+        return angle_deg
+    normalized = np.asarray(angle_deg, dtype=np.float64).copy()
+    normalized = ((normalized - target_center_deg + 180.0) % 360.0) - 180.0 + target_center_deg
+    for i in range(1, normalized.size):
+        delta = normalized[i] - normalized[i - 1]
+        if delta > 180.0:
+            normalized[i:] -= 360.0
+        elif delta < -180.0:
+            normalized[i:] += 360.0
+    return shift_curve_to_branch(normalized, target_center_deg)
 
 
 def preprocess_seed_path(
@@ -550,6 +630,85 @@ def load_matrix_csv(path: Path) -> np.ndarray:
     return matrix
 
 
+def safe_save_pdf(fig: plt.Figure, out_path: Path) -> None:
+    try:
+        fig.savefig(out_path, facecolor=fig.get_facecolor(), bbox_inches="tight")
+    except Exception as exc:
+        print(f"warning: skip pdf export {out_path}: {exc}")
+
+
+def add_scale_bar(
+    ax: plt.Axes,
+    length_data: float,
+    label: str = "1 m",
+    *,
+    side: str = "right",
+    font_prop: fm.FontProperties | None = None,
+    color: str = "#2b2d31",
+    pad_frac: float = 0.045,
+    linewidth: float = 2.2,
+) -> None:
+    x0, x1 = ax.get_xlim()
+    y0, y1 = ax.get_ylim()
+    x_span = abs(x1 - x0)
+    y_span = abs(y1 - y0)
+    if x_span <= 1e-6 or y_span <= 1e-6:
+        return
+
+    right_edge = min(x0, x1) if ax.xaxis_inverted() else max(x0, x1)
+    left_edge = max(x0, x1) if ax.xaxis_inverted() else min(x0, x1)
+    bottom_edge = max(y0, y1) if ax.yaxis_inverted() else min(y0, y1)
+    margin_x = pad_frac * x_span
+    margin_y = 0.022 * y_span
+
+    if side == "left":
+        if ax.xaxis_inverted():
+            x_start = left_edge - margin_x
+            x_end = x_start - length_data
+        else:
+            x_start = left_edge + margin_x
+            x_end = x_start + length_data
+    else:
+        if ax.xaxis_inverted():
+            x_end = right_edge + margin_x
+            x_start = x_end + length_data
+        else:
+            x_end = right_edge - margin_x
+            x_start = x_end - length_data
+    if ax.yaxis_inverted():
+        y_bar = bottom_edge - margin_y
+        text_y = y_bar - 0.006 * y_span
+    else:
+        y_bar = bottom_edge + margin_y
+        text_y = y_bar + 0.006 * y_span
+    tick_h = 0.012 * y_span
+
+    line_kwargs = dict(color=color, linewidth=linewidth, solid_capstyle="butt", zorder=20)
+    ax.plot([x_start, x_end], [y_bar, y_bar], **line_kwargs)
+    ax.plot([x_start, x_start], [y_bar - tick_h, y_bar + tick_h], **line_kwargs)
+    ax.plot([x_end, x_end], [y_bar - tick_h, y_bar + tick_h], **line_kwargs)
+    text_kwargs = dict(
+        ha="center",
+        va="bottom",
+        color=color,
+        fontsize=18,
+        fontweight="bold",
+        zorder=21,
+        path_effects=[pe.Stroke(linewidth=2.0, foreground="#fffef8"), pe.Normal()],
+    )
+    scale_font_prop = None
+    if font_prop is not None and CJK_FONT_PATH.exists():
+        scale_font_prop = fm.FontProperties(fname=str(CJK_FONT_PATH), size=17, weight="bold")
+        text_kwargs["fontproperties"] = scale_font_prop
+        text_kwargs.pop("fontsize", None)
+        text_kwargs.pop("fontweight", None)
+    text = ax.text(0.5 * (x_start + x_end), text_y, label, **text_kwargs)
+    text.set_fontsize(17)
+    text.set_fontweight("bold")
+    if scale_font_prop is not None:
+        text.set_fontproperties(scale_font_prop)
+
+
 def plot_case(
     occ: np.ndarray,
     cost_map: np.ndarray,
@@ -564,7 +723,14 @@ def plot_case(
     out_path: Path,
     split_world_points: Sequence[Tuple[int, float, float]] | None = None,
 ) -> None:
-    fig, axes = plt.subplots(1, 2, figsize=(12.2, 5.6), facecolor="#fbfbf8")
+    font_prop = fm.FontProperties(fname=str(CJK_FONT_PATH)) if CJK_FONT_PATH.exists() else None
+    paper_font_size = 13
+    legend_font_size = 15
+    fig = plt.figure(figsize=(10.4, 6.8), facecolor="#fbfbf8")
+    grid_spec = fig.add_gridspec(2, 2, width_ratios=[0.82, 1.18], height_ratios=[1.0, 1.0])
+    local_axes = [fig.add_subplot(grid_spec[0, 0]), fig.add_subplot(grid_spec[1, 0])]
+    global_ax = fig.add_subplot(grid_spec[:, 1])
+    axes = [*local_axes, global_ax]
     map_cmap = ListedColormap(["#f2f1ea", "#7b7b7f"])
     overlay_rgba = np.zeros((*cost_map.shape, 4), dtype=np.float32)
     cost_min = float(np.min(cost_map))
@@ -587,8 +753,10 @@ def plot_case(
         for spine in ax.spines.values():
             spine.set_linewidth(0.9)
             spine.set_edgecolor("#9a988f")
+    local_axes[0].set_anchor("E")
+    local_axes[1].set_anchor("E")
+    global_ax.set_anchor("W")
 
-    axes[0].imshow(overlay_rgba, origin="upper", interpolation="nearest")
     raw_grid = np.asarray(
         [world_to_grid(x, y, origin_x, origin_y, resolution) for x, y in raw_world_path], dtype=np.float32
     )
@@ -608,71 +776,250 @@ def plot_case(
         split_grid = [
             (idx, *world_to_grid(x, y, origin_x, origin_y, resolution)) for idx, x, y in split_world_points
         ]
+    local_view_override_path = out_path.parent / "local_view_overrides.json"
+    local_view_overrides = None
+    if local_view_override_path.exists():
+        with local_view_override_path.open("r", encoding="utf-8") as handle:
+            local_view_overrides = json.load(handle)
 
     sx, sy = start_xy
     gx, gy = goal_xy
+    route_colors = {
+        "raw": "#4C78A8",
+        "seed": "#E69F00",
+        "smooth": "#009E73",
+    }
     for ax in axes:
-        ax.scatter([sx], [sy], c="#e63b2e", s=60, marker="x", linewidths=1.7, label="Start", zorder=7)
-        ax.scatter([gx], [gy], c="#31c93c", s=42, marker="o", label="Goal", zorder=7)
+        ax.scatter([sx], [sy], c="#e63b2e", s=60, marker="x", linewidths=1.7, zorder=7)
+        ax.scatter([gx], [gy], c="#31c93c", s=42, marker="o", zorder=7)
 
-    axes[0].plot(
+    def _plot_route_triplet(ax):
+        ax.plot(
+            raw_grid[:, 0],
+            raw_grid[:, 1],
+            color=route_colors["raw"],
+            linewidth=1.25,
+            linestyle="--",
+            label="前端路径",
+            zorder=5,
+            path_effects=route_outline,
+        )
+        ax.plot(
+            seed_grid[:, 0],
+            seed_grid[:, 1],
+            color=route_colors["seed"],
+            linewidth=1.45,
+            linestyle="-",
+            alpha=0.98,
+            label="初始路径",
+            zorder=6,
+        )
+        ax.plot(
+            smooth_grid[:, 0],
+            smooth_grid[:, 1],
+            color=route_colors["smooth"],
+            linewidth=1.7,
+            solid_capstyle="round",
+            solid_joinstyle="round",
+            label="优化路径",
+            zorder=7,
+            path_effects=smooth_outline,
+        )
+
+    focus_regions: List[Tuple[int | None, float, float, int]] = []
+    if seed_grid.shape == smooth_grid.shape and seed_grid.size > 0:
+        diff = np.linalg.norm(seed_grid - smooth_grid, axis=1)
+        used_idx_windows: List[Tuple[int, int]] = []
+
+        def _register_focus(near_idx: int) -> None:
+            used_idx_windows.append((max(0, near_idx - 24), min(len(diff), near_idx + 25)))
+
+        def _is_used(near_idx: int) -> bool:
+            return any(lo <= near_idx < hi for lo, hi in used_idx_windows)
+
+        if split_grid:
+            scored_regions = []
+            for idx, xg, yg in split_grid:
+                # Do not waste local detail panels on start/goal markers when real split points exist.
+                if (abs(xg - sx) < 1e-3 and abs(yg - sy) < 1e-3) or (abs(xg - gx) < 1e-3 and abs(yg - gy) < 1e-3):
+                    continue
+                dist = np.linalg.norm(smooth_grid - np.array([xg, yg], dtype=np.float32), axis=1)
+                near_idx = int(np.argmin(dist))
+                lo = max(0, near_idx - 18)
+                hi = min(len(diff), near_idx + 19)
+                local_score = float(np.max(diff[lo:hi]))
+                scored_regions.append((local_score, idx, xg, yg, near_idx))
+            scored_regions.sort(key=lambda item: item[0], reverse=True)
+            for _, idx, xg, yg, near_idx in scored_regions[:2]:
+                focus_regions.append((idx, xg, yg, near_idx))
+                _register_focus(near_idx)
+
+        while len(focus_regions) < 2:
+            focus_idx = int(np.argmax(diff))
+            sorted_idx = np.argsort(diff)[::-1]
+            chosen_idx = None
+            for candidate_idx in sorted_idx:
+                if not _is_used(int(candidate_idx)):
+                    chosen_idx = int(candidate_idx)
+                    break
+            if chosen_idx is None:
+                chosen_idx = focus_idx
+            xg, yg = smooth_grid[chosen_idx]
+            focus_regions.append((None, float(xg), float(yg), chosen_idx))
+            _register_focus(chosen_idx)
+
+    if len(focus_regions) == 1:
+        focus_regions.append(focus_regions[0])
+    if not focus_regions:
+        fallback_idx = max(0, len(smooth_grid) // 2)
+        xg, yg = smooth_grid[fallback_idx]
+        focus_regions = [(None, float(xg), float(yg), fallback_idx)] * 2
+
+    local_view_specs = []
+    common_local_side = 0.0
+    for local_plot_idx in range(len(local_axes)):
+        split_idx, focus_x, focus_y, focus_idx = focus_regions[min(local_plot_idx, len(focus_regions) - 1)]
+        raw_focus_idx = int(np.argmin(np.linalg.norm(raw_grid - np.array([focus_x, focus_y], dtype=np.float32), axis=1)))
+        seed_lo = max(0, focus_idx - 26)
+        seed_hi = min(len(seed_grid), focus_idx + 28)
+        raw_lo = max(0, raw_focus_idx - 18)
+        raw_hi = min(len(raw_grid), raw_focus_idx + 20)
+        focus_arrays = [
+            raw_grid[raw_lo:raw_hi],
+            seed_grid[seed_lo:seed_hi],
+            smooth_grid[seed_lo:seed_hi],
+            np.array([[focus_x, focus_y]], dtype=np.float32),
+        ]
+        focus_stack = np.vstack(focus_arrays)
+        x_min = float(np.min(focus_stack[:, 0]))
+        x_max = float(np.max(focus_stack[:, 0]))
+        y_min = float(np.min(focus_stack[:, 1]))
+        y_max = float(np.max(focus_stack[:, 1]))
+        pad = 1.15
+        local_zoom_scale = 0.84
+        cx = 0.5 * (x_min + x_max)
+        cy = 0.5 * (y_min + y_max)
+        side = (max(x_max - x_min, y_max - y_min) + 2.0 * pad) * local_zoom_scale
+        common_local_side = max(common_local_side, side)
+        local_view_specs.append(
+            {
+                "split_idx": split_idx,
+                "focus_x": float(focus_x),
+                "focus_y": float(focus_y),
+                "cx": float(cx),
+                "cy": float(cy),
+                "side": float(side),
+                "goal_dist": float(math.hypot(float(focus_x) - gx, float(focus_y) - gy)),
+            }
+        )
+
+    for local_plot_idx, ax in enumerate(local_axes):
+        _plot_route_triplet(ax)
+        view_spec = local_view_specs[min(local_plot_idx, len(local_view_specs) - 1)]
+        split_idx = view_spec["split_idx"]
+        focus_x = view_spec["focus_x"]
+        focus_y = view_spec["focus_y"]
+        side = common_local_side if common_local_side > 0.0 else view_spec["side"]
+        half_side = 0.5 * side
+        x0 = view_spec["cx"] - half_side
+        x1 = view_spec["cx"] + half_side
+        y0 = view_spec["cy"] - half_side
+        y1 = view_spec["cy"] + half_side
+        if view_spec["goal_dist"] <= 0.42 * side and not local_view_overrides:
+            # For goal-focused local panels, anchor the goal near the lower-left
+            # corner so the approach geometry remains visible to the right/upstream.
+            goal_left_frac = 0.16
+            goal_from_top_frac = 0.82
+            x0 = gx - goal_left_frac * side
+            x1 = x0 + side
+            y0 = gy - goal_from_top_frac * side
+            y1 = y0 + side
+        if local_plot_idx == 1 and not local_view_overrides:
+            shift_right = 0.12 * side
+            shift_down = 0.14 * side
+            x0 += shift_right
+            x1 += shift_right
+            y0 += shift_down
+            y1 += shift_down
+        if local_view_overrides and local_plot_idx < len(local_view_overrides):
+            override = local_view_overrides[local_plot_idx]
+            x0 = float(override["xlim"][0])
+            x1 = float(override["xlim"][1])
+            y0 = float(override["ylim"][0])
+            y1 = float(override["ylim"][1])
+            split_idx = override.get("split_idx", split_idx)
+            focus_x = float(override.get("focus_x", focus_x))
+            focus_y = float(override.get("focus_y", focus_y))
+        ax.set_xlim(x0, x1)
+        ax.set_ylim(y1, y0)
+        if hasattr(ax, "set_box_aspect"):
+            ax.set_box_aspect(1)
+        else:
+            ax.set_aspect("equal", adjustable="box")
+        if split_idx is not None:
+            ax.scatter(
+                [focus_x],
+                [focus_y],
+                s=52,
+                c="#1f4e99",
+                edgecolors="#fffef8",
+                linewidths=1.0,
+                zorder=9,
+            )
+            ax.text(
+                focus_x + 0.35,
+                focus_y - 0.35,
+                str(split_idx + 1),
+                fontsize=18,
+                color="#1f4e99",
+                ha="left",
+                va="center",
+                zorder=10,
+                path_effects=[pe.Stroke(linewidth=1.4, foreground="#fffef8"), pe.Normal()],
+                fontproperties=font_prop,
+            )
+        panel_label = "(a) 局部细节1" if local_plot_idx == 0 else "(b) 局部细节2"
+        panel_text = ax.text(
+            0.02,
+            0.98,
+            panel_label,
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize=paper_font_size + 4,
+            fontweight="semibold",
+            color="#222222",
+            fontproperties=font_prop,
+        )
+        panel_text.set_fontsize(paper_font_size + 2)
+
+    global_ax.plot(
         raw_grid[:, 0],
         raw_grid[:, 1],
-        color="#7ecf48",
-        linewidth=1.1,
-        solid_capstyle="round",
-        solid_joinstyle="round",
-        label="Model Route",
-        zorder=5,
-        path_effects=route_outline,
-    )
-    axes[0].text(
-        0.02,
-        0.98,
-        "(a) Transformer-Guided A*",
-        transform=axes[0].transAxes,
-        ha="left",
-        va="top",
-        fontsize=11,
-        fontweight="semibold",
-        color="#222222",
-    )
-    axes[0].legend(
-        loc="upper center",
-        fontsize=9,
-        framealpha=0.94,
-        ncol=3,
-        facecolor="#fffef9",
-        edgecolor="#c5c2b8",
-    )
-
-    axes[1].plot(
-        raw_grid[:, 0],
-        raw_grid[:, 1],
-        color="#b8b3a1",
-        linewidth=1.0,
+        color=route_colors["raw"],
+        linewidth=1.2,
         alpha=0.95,
         linestyle="--",
-        label="Model Route",
+        label="前端路径",
         zorder=3,
     )
-    axes[1].plot(
+    global_ax.plot(
         smooth_grid[:, 0],
         smooth_grid[:, 1],
-        color="#78bf54",
-        linewidth=1.1,
+        color=route_colors["smooth"],
+        linewidth=1.35,
         solid_capstyle="round",
         solid_joinstyle="round",
-        label="Smoothed Route",
+        label="优化路径",
         zorder=5,
         path_effects=smooth_outline,
     )
     if seed_overlaps_smooth:
         marker_step = max(1, len(seed_grid) // 18)
-        axes[1].plot(
+        global_ax.plot(
             seed_grid[:, 0],
             seed_grid[:, 1],
-            color="#d89133",
+            color=route_colors["seed"],
             linewidth=0.0,
             linestyle="None",
             marker="o",
@@ -681,43 +1028,38 @@ def plot_case(
             markeredgewidth=0.45,
             markeredgecolor="#fffef8",
             alpha=0.96,
-            label="XY Seed Route",
+            label="初始路径",
             zorder=6,
         )
     else:
-        axes[1].plot(
+        global_ax.plot(
             seed_grid[:, 0],
             seed_grid[:, 1],
-            color="#d89133",
-            linewidth=1.1,
+            color=route_colors["seed"],
+            linewidth=1.2,
             alpha=0.98,
-            linestyle="-.",
-            label="XY Seed Route",
+            linestyle="-",
+            label="初始路径",
             zorder=4,
         )
-    axes[1].text(
+
+    global_text = global_ax.text(
         0.02,
         0.98,
-        "(b) Backend Smoother",
-        transform=axes[1].transAxes,
+        "(c) 全局路径结果",
+        transform=global_ax.transAxes,
         ha="left",
         va="top",
-        fontsize=11,
+        fontsize=paper_font_size + 2,
         fontweight="semibold",
         color="#222222",
+        fontproperties=font_prop,
     )
-    axes[1].legend(
-        loc="upper center",
-        fontsize=9,
-        framealpha=0.94,
-        ncol=4,
-        facecolor="#fffef9",
-        edgecolor="#c5c2b8",
-    )
+    global_text.set_fontsize(paper_font_size + 4)
 
     if split_grid:
         for idx, xg, yg in split_grid:
-            axes[1].scatter(
+            global_ax.scatter(
                 [xg],
                 [yg],
                 s=20,
@@ -726,7 +1068,7 @@ def plot_case(
                 linewidths=0.6,
                 zorder=8,
             )
-            axes[1].text(
+            global_ax.text(
                 xg + 0.35,
                 yg - 0.35,
                 str(idx + 1),
@@ -734,15 +1076,58 @@ def plot_case(
                 color="#1f4e99",
                 ha="left",
                 va="center",
-                zorder=9,
-                path_effects=[pe.Stroke(linewidth=1.2, foreground="#fffef8"), pe.Normal()],
-            )
+        zorder=9,
+        path_effects=[pe.Stroke(linewidth=1.2, foreground="#fffef8"), pe.Normal()],
+    )
 
-    fig.tight_layout(pad=1.0, w_pad=1.4)
+    add_scale_bar(global_ax, 1.0 / resolution, side="left", font_prop=font_prop)
+
+    legend_handles = [
+        Line2D([0], [0], marker="x", color="none", markeredgecolor="#e63b2e", markeredgewidth=1.7, markersize=9, label="起点"),
+        Line2D([0], [0], marker="o", color="none", markerfacecolor="#31c93c", markeredgecolor="#31c93c", markersize=7, label="终点"),
+        Line2D([0], [0], color=route_colors["raw"], linestyle="--", linewidth=1.8, label="前端路径"),
+        Line2D([0], [0], color=route_colors["seed"], linestyle="-", linewidth=1.8, label="初始路径"),
+        Line2D([0], [0], color=route_colors["smooth"], linestyle="-", linewidth=2.0, label="优化路径"),
+    ]
+    legend_kwargs = dict(
+        handles=legend_handles,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.992),
+        ncol=5,
+        framealpha=0.96,
+        facecolor="#fffef9",
+        edgecolor="#c5c2b8",
+        handlelength=1.9,
+        columnspacing=0.9,
+        borderpad=0.38,
+    )
+    if font_prop is not None:
+        legend_kwargs["prop"] = fm.FontProperties(fname=str(CJK_FONT_PATH), size=legend_font_size)
+    else:
+        legend_kwargs["fontsize"] = legend_font_size
+    legend = fig.legend(**legend_kwargs)
+
+    fig.subplots_adjust(left=0.028, right=0.992, bottom=0.03, top=0.91, wspace=0.002, hspace=0.008)
+    fig.canvas.draw()
+    global_pos = global_ax.get_position()
+    local_top_pos = local_axes[0].get_position()
+    gap = 0.012
+    local_total_height = global_pos.height
+    each_height = 0.5 * (local_total_height - gap)
+    left_x0 = local_top_pos.x0
+    max_width = max(0.0, global_pos.x0 - left_x0 - 0.012)
+    each_width = min(each_height, max_width)
+    left_x = global_pos.x0 - 0.012 - each_width
+    local_axes[0].set_position([left_x, global_pos.y0 + each_height + gap, each_width, each_height])
+    local_axes[1].set_position([left_x, global_pos.y0, each_width, each_height])
+    group_left = min(local_axes[0].get_position().x0, local_axes[1].get_position().x0, global_ax.get_position().x0)
+    group_right = max(local_axes[0].get_position().x1, local_axes[1].get_position().x1, global_ax.get_position().x1)
+    group_center = 0.5 * (group_left + group_right)
+    legend.set_bbox_to_anchor((group_center, 0.992), transform=fig.transFigure)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=PLOT_DPI, facecolor=fig.get_facecolor(), bbox_inches="tight")
     fig.savefig(out_path.with_name("offline_demo_paper.png"), dpi=PLOT_DPI, facecolor=fig.get_facecolor(), bbox_inches="tight")
-    fig.savefig(out_path.with_name("offline_demo_paper.pdf"), facecolor=fig.get_facecolor(), bbox_inches="tight")
+    safe_save_pdf(fig, out_path.with_name("offline_demo_paper.pdf"))
     plt.close(fig)
 
 
@@ -801,7 +1186,7 @@ def plot_split_points_debug(
     ax.legend(loc="upper center", fontsize=8.5, framealpha=0.94, ncol=4, facecolor="#fffef9", edgecolor="#c5c2b8")
     fig.tight_layout(pad=0.8)
     fig.savefig(out_path, dpi=PLOT_DPI, facecolor=fig.get_facecolor(), bbox_inches="tight")
-    fig.savefig(out_path.with_suffix(".pdf"), facecolor=fig.get_facecolor(), bbox_inches="tight")
+    safe_save_pdf(fig, out_path.with_suffix(".pdf"))
     plt.close(fig)
 
 
@@ -812,20 +1197,27 @@ def plot_curvature_compare(
     out_path: Path,
     include_raw_path: bool = True,
     split_world_points: Sequence[Tuple[int, float, float]] = (),
+    show_legend: bool = False,
+    curvature_limit: float = 1.0,
 ) -> None:
-    fig, ax = plt.subplots(1, 1, figsize=(7.2, 4.3), facecolor="#fbfbf8")
-    ax.set_facecolor("#fbfbf8")
+    plt.rcParams["axes.unicode_minus"] = False
+    font_prop = fm.FontProperties(fname=str(CJK_FONT_PATH)) if CJK_FONT_PATH.exists() else None
+    paper_font_size = 17
+    tick_font_size = 24
+    fig, ax = plt.subplots(1, 1, figsize=(8.3, 4.6), facecolor="#fcfcfb")
+    ax.set_facecolor("#fcfcfb")
     for spine in ax.spines.values():
         spine.set_linewidth(0.9)
-        spine.set_edgecolor("#9a988f")
-    ax.grid(True, color="#d8d5cc", linewidth=0.6, alpha=0.75)
+        spine.set_edgecolor("#a9adb3")
+    ax.set_axisbelow(True)
+    ax.grid(True, color="#d9dde3", linewidth=0.7, alpha=0.85)
 
     curve_specs = [
-        ("Seed Route", seed_world_path, "#d89133", "-.", 1.25),
-        ("Smoothed Route", smoothed_world_path, "#78bf54", "-", 1.35),
+        ("初始路径", seed_world_path, "#E69F00", "-", 1.7),
+        ("优化路径", smoothed_world_path, "#009E73", "-", 1.9),
     ]
     if include_raw_path:
-        curve_specs.insert(0, ("Model Route", raw_world_path, "#b8b3a1", "--", 1.2))
+        curve_specs.insert(0, ("前端路径", raw_world_path, "#4C78A8", "--", 1.6))
     for label, path, color, linestyle, linewidth in curve_specs:
         s, kappa = curvature_profile(path)
         if s.size == 0:
@@ -839,17 +1231,27 @@ def plot_curvature_compare(
             label=label,
         )
 
+    for idx, ref_y in enumerate((-curvature_limit, curvature_limit)):
+        ax.axhline(
+            ref_y,
+            color="#D62728",
+            linestyle="--",
+            linewidth=1.0,
+            alpha=0.9,
+            zorder=1,
+            label="最大曲率" if idx == 0 else None,
+        )
     split_s = project_split_points_to_arc_length(seed_world_path, split_world_points)
     if split_s:
         ymin, ymax = ax.get_ylim()
         y_text = ymax - 0.04 * (ymax - ymin)
         for idx, split_arc in split_s:
-            ax.axvline(split_arc, color="#1f4e99", linestyle=":", linewidth=0.85, alpha=0.9, zorder=1)
+            ax.axvline(split_arc, color="#5B8FF9", linestyle=":", linewidth=0.95, alpha=0.95, zorder=1)
             ax.text(
                 split_arc,
                 y_text,
                 str(idx + 1),
-                fontsize=8,
+                fontsize=8.5,
                 color="#1f4e99",
                 ha="center",
                 va="bottom",
@@ -857,18 +1259,237 @@ def plot_curvature_compare(
                 path_effects=[pe.Stroke(linewidth=1.2, foreground="#fffef8"), pe.Normal()],
             )
 
-    ax.set_xlabel("s [m]")
-    ax.set_ylabel("kappa [1/m]")
-    ax.legend(
-        loc="upper right",
-        fontsize=9,
-        framealpha=0.94,
-        facecolor="#fffef9",
-        edgecolor="#c5c2b8",
-    )
-    fig.tight_layout(pad=0.8)
+    ax.tick_params(axis="both", labelsize=tick_font_size, colors="#3d4148")
+    for label in ax.get_xticklabels() + ax.get_yticklabels():
+        if font_prop is not None:
+            label.set_fontproperties(font_prop)
+        label.set_fontsize(tick_font_size)
+
+    label_kwargs = {"fontsize": paper_font_size, "color": "#22252b"}
+    if font_prop is not None:
+        label_kwargs["fontproperties"] = font_prop
+    ax.set_xlabel("纵向位移 [m]", **label_kwargs)
+    ax.set_ylabel("曲率 [1/m]", **label_kwargs)
+    ax.xaxis.label.set_fontsize(paper_font_size)
+    ax.yaxis.label.set_fontsize(paper_font_size)
+
+    if show_legend:
+        legend_font_size = 18
+        legend_kwargs = dict(
+            loc="upper right",
+            bbox_to_anchor=(0.98, 0.98),
+            fontsize=legend_font_size,
+            framealpha=0.96,
+            facecolor="#ffffff",
+            edgecolor="#cfd6de",
+            borderpad=0.35,
+            labelspacing=0.35,
+            handlelength=1.9,
+            handletextpad=0.5,
+            borderaxespad=0.0,
+            ncol=1,
+        )
+        if font_prop is not None:
+            legend_kwargs["prop"] = fm.FontProperties(fname=str(CJK_FONT_PATH), size=legend_font_size)
+            legend_kwargs.pop("fontsize", None)
+        legend = ax.legend(**legend_kwargs)
+        if font_prop is not None:
+            for text in legend.get_texts():
+                text.set_fontproperties(font_prop)
+
+    fig.subplots_adjust(left=0.12, right=0.985, bottom=0.18, top=0.95)
     fig.savefig(out_path, dpi=PLOT_DPI, facecolor=fig.get_facecolor(), bbox_inches="tight")
-    fig.savefig(out_path.with_suffix(".pdf"), facecolor=fig.get_facecolor(), bbox_inches="tight")
+    safe_save_pdf(fig, out_path.with_suffix(".pdf"))
+    plt.close(fig)
+
+
+def plot_heading_compare(
+    raw_world_path: Sequence[Tuple[float, float]],
+    seed_world_path: Sequence[Tuple[float, float]],
+    smoothed_world_path: Sequence[Tuple[float, float]],
+    out_path: Path,
+    split_world_points: Sequence[Tuple[int, float, float]] = (),
+    target_center_deg: float = -200.0,
+) -> None:
+    plt.rcParams["axes.unicode_minus"] = False
+    font_prop = fm.FontProperties(fname=str(CJK_FONT_PATH)) if CJK_FONT_PATH.exists() else None
+    paper_font_size = 14
+    tick_font_size = 18
+    fig, ax = plt.subplots(1, 1, figsize=(8.3, 4.6), facecolor="#fcfcfb")
+    ax.set_facecolor("#fcfcfb")
+    for spine in ax.spines.values():
+        spine.set_linewidth(0.9)
+        spine.set_edgecolor("#a9adb3")
+    ax.set_axisbelow(True)
+    ax.grid(True, color="#d9dde3", linewidth=0.7, alpha=0.85)
+
+    raw_s_ref, raw_heading_deg = heading_profile(raw_world_path)
+    raw_heading_wrapped = normalize_heading_branch(raw_heading_deg, target_center_deg)
+    plotted_headings: List[np.ndarray] = []
+    curve_specs = [
+        ("前端路径", raw_s_ref, raw_heading_wrapped, "#4C78A8", "--", 1.6),
+        ("初始路径", *heading_profile(seed_world_path), "#E69F00", "-", 1.7),
+        ("优化路径", *heading_profile(smoothed_world_path), "#009E73", "-", 1.9),
+    ]
+    for label, s_src, heading_src, color, linestyle, linewidth in curve_specs:
+        if s_src.size == 0:
+            continue
+        if raw_s_ref.size > 0 and label != "前端路径":
+            plot_s = raw_s_ref
+            plot_heading = interpolate_profile_to_reference(raw_s_ref, s_src, heading_src)
+            plot_heading = normalize_heading_branch(plot_heading, target_center_deg)
+        else:
+            plot_s = s_src
+            plot_heading = normalize_heading_branch(heading_src, target_center_deg)
+        ax.plot(
+            plot_s,
+            plot_heading,
+            color=color,
+            linestyle=linestyle,
+            linewidth=linewidth,
+            label=label,
+        )
+        plotted_headings.append(np.asarray(plot_heading, dtype=np.float64))
+
+    if plotted_headings:
+        max_dev = max(float(np.max(np.abs(h - target_center_deg))) for h in plotted_headings if h.size > 0)
+        half_range = max(35.0, math.ceil((max_dev + 8.0) / 10.0) * 10.0)
+        ax.set_ylim(target_center_deg - half_range, target_center_deg + half_range)
+
+    split_s = project_split_points_to_arc_length(raw_world_path, split_world_points)
+    if split_s:
+        ymin, ymax = ax.get_ylim()
+        y_text = ymax - 0.04 * (ymax - ymin)
+        for idx, split_arc in split_s:
+            ax.axvline(split_arc, color="#5B8FF9", linestyle=":", linewidth=0.95, alpha=0.95, zorder=1)
+            ax.text(
+                split_arc,
+                y_text,
+                str(idx + 1),
+                fontsize=8.5,
+                color="#1f4e99",
+                ha="center",
+                va="bottom",
+                zorder=6,
+                path_effects=[pe.Stroke(linewidth=1.2, foreground="#fffef8"), pe.Normal()],
+            )
+
+    ax.tick_params(axis="both", labelsize=tick_font_size, colors="#3d4148")
+    for label in ax.get_xticklabels() + ax.get_yticklabels():
+        if font_prop is not None:
+            label.set_fontproperties(font_prop)
+        label.set_fontsize(tick_font_size)
+
+    label_kwargs = {"fontsize": paper_font_size, "color": "#22252b"}
+    if font_prop is not None:
+        label_kwargs["fontproperties"] = font_prop
+    ax.set_xlabel("纵向位移 [m]", **label_kwargs)
+    ax.set_ylabel("航向角 [deg]", **label_kwargs)
+
+    legend_font_size = 16
+    legend_kwargs = dict(
+        loc="lower right",
+        bbox_to_anchor=(0.98, 0.04),
+        fontsize=legend_font_size,
+        framealpha=0.96,
+        facecolor="#ffffff",
+        edgecolor="#cfd6de",
+        borderpad=0.35,
+        labelspacing=0.35,
+        handlelength=1.9,
+        handletextpad=0.5,
+        borderaxespad=0.0,
+        ncol=1,
+    )
+    if font_prop is not None:
+        legend_kwargs["prop"] = fm.FontProperties(fname=str(CJK_FONT_PATH), size=legend_font_size)
+        legend_kwargs.pop("fontsize", None)
+    legend = ax.legend(**legend_kwargs)
+    if font_prop is not None:
+        for text in legend.get_texts():
+            text.set_fontproperties(font_prop)
+            text.set_fontsize(legend_font_size)
+
+    fig.subplots_adjust(left=0.12, right=0.985, bottom=0.18, top=0.95)
+    fig.savefig(out_path, dpi=PLOT_DPI, facecolor=fig.get_facecolor(), bbox_inches="tight")
+    safe_save_pdf(fig, out_path.with_suffix(".pdf"))
+    plt.close(fig)
+
+
+def plot_xy_trajectory_compare(
+    raw_world_path: Sequence[Tuple[float, float]],
+    seed_world_path: Sequence[Tuple[float, float]],
+    smoothed_world_path: Sequence[Tuple[float, float]],
+    out_path: Path,
+) -> None:
+    plt.rcParams["axes.unicode_minus"] = False
+    font_prop = fm.FontProperties(fname=str(CJK_FONT_PATH)) if CJK_FONT_PATH.exists() else None
+    paper_font_size = 12
+    tick_font_size = 15
+    legend_font_size = 14
+    legend_font_prop = fm.FontProperties(fname=str(CJK_FONT_PATH), size=legend_font_size) if CJK_FONT_PATH.exists() else None
+    fig, ax = plt.subplots(1, 1, figsize=(6.8, 6.0), facecolor="#fcfcfb")
+    ax.set_facecolor("#fcfcfb")
+    for spine in ax.spines.values():
+        spine.set_linewidth(0.9)
+        spine.set_edgecolor("#a9adb3")
+    ax.set_axisbelow(True)
+    ax.grid(True, color="#d9dde3", linewidth=0.7, alpha=0.85)
+
+    curve_specs = [
+        ("前端路径", raw_world_path, "#4C78A8", "--", 1.7),
+        ("初始路径", seed_world_path, "#E69F00", "-", 1.8),
+        ("优化路径", smoothed_world_path, "#009E73", "-", 2.0),
+    ]
+    for label, path, color, linestyle, linewidth in curve_specs:
+        arr = np.asarray(path, dtype=np.float32)
+        if arr.size == 0:
+            continue
+        ax.plot(
+            arr[:, 0],
+            arr[:, 1],
+            color=color,
+            linestyle=linestyle,
+            linewidth=linewidth,
+            label=label,
+        )
+
+    ax.set_aspect("equal", adjustable="box")
+    ax.tick_params(axis="both", labelsize=tick_font_size, colors="#3d4148")
+    for label in ax.get_xticklabels() + ax.get_yticklabels():
+        if font_prop is not None:
+            label.set_fontproperties(font_prop)
+        label.set_fontsize(tick_font_size)
+
+    label_kwargs = {"fontsize": paper_font_size, "color": "#22252b"}
+    if font_prop is not None:
+        label_kwargs["fontproperties"] = font_prop
+    ax.set_xlabel("X 坐标 [m]", **label_kwargs)
+    ax.set_ylabel("Y 坐标 [m]", **label_kwargs)
+
+    legend_kwargs = dict(
+        loc="lower left",
+        bbox_to_anchor=(0.04, 0.04),
+        fontsize=legend_font_size,
+        framealpha=0.96,
+        facecolor="#ffffff",
+        edgecolor="#cfd6de",
+        borderpad=0.7,
+        labelspacing=0.6,
+        handlelength=2.6,
+        borderaxespad=0.0,
+    )
+    if legend_font_prop is not None:
+        legend_kwargs["prop"] = legend_font_prop
+        legend_kwargs.pop("fontsize", None)
+    legend = ax.legend(**legend_kwargs)
+    if legend_font_prop is not None:
+        for text in legend.get_texts():
+            text.set_fontproperties(legend_font_prop)
+
+    fig.subplots_adjust(left=0.14, right=0.98, bottom=0.13, top=0.97)
+    fig.savefig(out_path, dpi=PLOT_DPI, facecolor=fig.get_facecolor(), bbox_inches="tight")
+    safe_save_pdf(fig, out_path.with_suffix(".pdf"))
     plt.close(fig)
 
 
@@ -917,6 +1538,8 @@ def main() -> int:
         split_debug_png = input_dir / "offline_demo_split_points.png"
         curvature_png = input_dir / "curvature_compare.png"
         curvature_seed_smooth_png = input_dir / "curvature_compare_seed_smooth.png"
+        heading_png = input_dir / "heading_compare.png"
+        trajectory_xy_png = input_dir / "trajectory_xy_compare.png"
         plot_case(
             occ=occ,
             cost_map=cost_map,
@@ -949,6 +1572,7 @@ def main() -> int:
             smoothed_world_path=smoothed_world_path,
             out_path=curvature_png,
             split_world_points=split_world_points,
+            curvature_limit=0.8,
         )
         plot_curvature_compare(
             raw_world_path=raw_world_path,
@@ -957,11 +1581,27 @@ def main() -> int:
             out_path=curvature_seed_smooth_png,
             include_raw_path=False,
             split_world_points=split_world_points,
+            curvature_limit=0.8,
+        )
+        plot_heading_compare(
+            raw_world_path=raw_world_path,
+            seed_world_path=seed_world_path,
+            smoothed_world_path=smoothed_world_path,
+            out_path=heading_png,
+            split_world_points=split_world_points,
+        )
+        plot_xy_trajectory_compare(
+            raw_world_path=raw_world_path,
+            seed_world_path=seed_world_path,
+            smoothed_world_path=smoothed_world_path,
+            out_path=trajectory_xy_png,
         )
         print(f"saved_png={fig_png}")
         print(f"saved_split_debug_png={split_debug_png}")
         print(f"saved_curvature_png={curvature_png}")
         print(f"saved_curvature_seed_smooth_png={curvature_seed_smooth_png}")
+        print(f"saved_heading_png={heading_png}")
+        print(f"saved_trajectory_xy_png={trajectory_xy_png}")
         return 0
 
     rng = random.Random(args.seed)
@@ -1030,6 +1670,8 @@ def main() -> int:
     split_debug_png = out_dir / "offline_demo_split_points.png"
     curvature_png = out_dir / "curvature_compare.png"
     curvature_seed_smooth_png = out_dir / "curvature_compare_seed_smooth.png"
+    heading_png = out_dir / "heading_compare.png"
+    trajectory_xy_png = out_dir / "trajectory_xy_compare.png"
     meta_json = out_dir / "meta.json"
 
     write_raw_path_csv(raw_csv, raw_world_path)
@@ -1100,6 +1742,7 @@ def main() -> int:
         smoothed_world_path=smoothed_world_path,
         out_path=curvature_png,
         split_world_points=split_world_points,
+        curvature_limit=0.8,
     )
     plot_curvature_compare(
         raw_world_path=raw_world_path,
@@ -1108,6 +1751,20 @@ def main() -> int:
         out_path=curvature_seed_smooth_png,
         include_raw_path=False,
         split_world_points=split_world_points,
+        curvature_limit=0.8,
+    )
+    plot_heading_compare(
+        raw_world_path=raw_world_path,
+        seed_world_path=seed_world_path,
+        smoothed_world_path=smoothed_world_path,
+        out_path=heading_png,
+        split_world_points=split_world_points,
+    )
+    plot_xy_trajectory_compare(
+        raw_world_path=raw_world_path,
+        seed_world_path=seed_world_path,
+        smoothed_world_path=smoothed_world_path,
+        out_path=trajectory_xy_png,
     )
 
     meta = {
@@ -1145,6 +1802,8 @@ def main() -> int:
     print(f"saved_split_debug_png={split_debug_png}")
     print(f"saved_curvature_png={curvature_png}")
     print(f"saved_curvature_seed_smooth_png={curvature_seed_smooth_png}")
+    print(f"saved_heading_png={heading_png}")
+    print(f"saved_trajectory_xy_png={trajectory_xy_png}")
     print(f"saved_meta={meta_json}")
     print(f"map_index={map_index}")
     print(f"start_xy={start_xy}")

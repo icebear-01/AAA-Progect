@@ -2,6 +2,7 @@
 
 #include <yaml-cpp/yaml.h>
 
+#include <chrono>
 #include <cmath>
 #include <fstream>
 #include <iostream>
@@ -16,6 +17,7 @@ struct Args {
     std::string output_csv;
     std::string seed_csv;
     std::string split_points_csv;
+    std::string metrics_json;
 };
 
 Args ParseArgs(int argc, char** argv) {
@@ -30,13 +32,15 @@ Args ParseArgs(int argc, char** argv) {
             args.seed_csv = argv[++i];
         } else if (token == "--split-points-csv" && i + 1 < argc) {
             args.split_points_csv = argv[++i];
+        } else if (token == "--metrics-json" && i + 1 < argc) {
+            args.metrics_json = argv[++i];
         } else {
             throw std::runtime_error("Unknown or incomplete argument: " + token);
         }
     }
     if (args.input_yaml.empty() || args.output_csv.empty()) {
         throw std::runtime_error(
-            "Usage: smooth_path_cli --input-yaml <yaml> --output-csv <csv> [--seed-csv <csv>] [--split-points-csv <csv>]");
+            "Usage: smooth_path_cli --input-yaml <yaml> --output-csv <csv> [--seed-csv <csv>] [--split-points-csv <csv>] [--metrics-json <json>]");
     }
     return args;
 }
@@ -101,6 +105,66 @@ void WriteSplitPointsCsv(const std::string& output_csv, const VectorVec4d& point
     }
 }
 
+double ComputePathLength(const VectorVec4d& path) {
+    double length = 0.0;
+    for (std::size_t i = 1; i < path.size(); ++i) {
+        const double dx = path[i].x() - path[i - 1].x();
+        const double dy = path[i].y() - path[i - 1].y();
+        length += std::hypot(dx, dy);
+    }
+    return length;
+}
+
+struct SeedOptimizationResult {
+    VectorVec4d path;
+    bool qp_init_failed = false;
+    bool qp_solve_failed = false;
+};
+
+void WriteMetricsJson(const std::string& output_json,
+                      double seed_stage_ms,
+                      double smooth_stage_ms,
+                      double total_cli_ms,
+                      const VectorVec4d& raw_path,
+                      const VectorVec4d& seed_path,
+                      const VectorVec4d& smoothed_path,
+                      std::size_t split_points_count,
+                      bool seed_qp_init_fallback_raw,
+                      bool seed_qp_solve_fallback_raw,
+                      bool seed_collision_fallback_raw,
+                      bool resampled_seed_collision_fallback_raw,
+                      bool smooth_collision_fallback_seed) {
+    const bool seed_success = !(seed_qp_init_fallback_raw || seed_qp_solve_fallback_raw ||
+                                seed_collision_fallback_raw || resampled_seed_collision_fallback_raw);
+    const bool smooth_success = !smooth_collision_fallback_seed;
+    const bool backend_success = seed_success && smooth_success;
+    std::ofstream out(output_json);
+    if (!out.is_open()) {
+        throw std::runtime_error("Failed to open metrics json: " + output_json);
+    }
+    out << "{\n"
+        << "  \"seed_stage_ms\": " << seed_stage_ms << ",\n"
+        << "  \"smooth_stage_ms\": " << smooth_stage_ms << ",\n"
+        << "  \"total_cli_ms\": " << total_cli_ms << ",\n"
+        << "  \"raw_points\": " << raw_path.size() << ",\n"
+        << "  \"seed_points\": " << seed_path.size() << ",\n"
+        << "  \"smoothed_points\": " << smoothed_path.size() << ",\n"
+        << "  \"raw_length_m\": " << ComputePathLength(raw_path) << ",\n"
+        << "  \"seed_length_m\": " << ComputePathLength(seed_path) << ",\n"
+        << "  \"smoothed_length_m\": " << ComputePathLength(smoothed_path) << ",\n"
+        << "  \"segment_split_points\": " << split_points_count << ",\n"
+        << "  \"seed_qp_init_fallback_raw\": " << (seed_qp_init_fallback_raw ? "true" : "false") << ",\n"
+        << "  \"seed_qp_solve_fallback_raw\": " << (seed_qp_solve_fallback_raw ? "true" : "false") << ",\n"
+        << "  \"seed_collision_fallback_raw\": " << (seed_collision_fallback_raw ? "true" : "false") << ",\n"
+        << "  \"resampled_seed_collision_fallback_raw\": "
+        << (resampled_seed_collision_fallback_raw ? "true" : "false") << ",\n"
+        << "  \"smooth_collision_fallback_seed\": " << (smooth_collision_fallback_seed ? "true" : "false") << ",\n"
+        << "  \"seed_success\": " << (seed_success ? "true" : "false") << ",\n"
+        << "  \"smooth_success\": " << (smooth_success ? "true" : "false") << ",\n"
+        << "  \"backend_success\": " << (backend_success ? "true" : "false") << "\n"
+        << "}\n";
+}
+
 VectorVec4d BuildPathWithYaw(const std::vector<Vec2d>& xy, const VectorVec4d& ref_path) {
     VectorVec4d path;
     path.reserve(xy.size());
@@ -124,9 +188,9 @@ VectorVec4d BuildPathWithYaw(const std::vector<Vec2d>& xy, const VectorVec4d& re
     return path;
 }
 
-VectorVec4d OptimizeSeedPathXY(const VectorVec4d& raw_path, double xy_box_half_extent) {
+SeedOptimizationResult OptimizeSeedPathXY(const VectorVec4d& raw_path, double xy_box_half_extent) {
     if (raw_path.size() < 3) {
-        return raw_path;
+        return SeedOptimizationResult{raw_path, false, false};
     }
 
     const int n_total = static_cast<int>(raw_path.size());
@@ -197,12 +261,12 @@ VectorVec4d OptimizeSeedPathXY(const VectorVec4d& raw_path, double xy_box_half_e
         !solver.data()->setLowerBound(lower_bound) || !solver.data()->setUpperBound(upper_bound) ||
         !solver.initSolver()) {
         std::cerr << "seed QP init failed, fallback to raw path" << std::endl;
-        return raw_path;
+        return SeedOptimizationResult{raw_path, true, false};
     }
 
     if (solver.solveProblem() != OsqpEigen::ErrorExitFlag::NoError) {
         std::cerr << "seed QP solve failed, fallback to raw path" << std::endl;
-        return raw_path;
+        return SeedOptimizationResult{raw_path, false, true};
     }
 
     const Eigen::VectorXd solution = solver.getSolution();
@@ -211,7 +275,7 @@ VectorVec4d OptimizeSeedPathXY(const VectorVec4d& raw_path, double xy_box_half_e
     for (int i = 0; i < n_total; ++i) {
         seed_xy.emplace_back(solution(2 * i), solution(2 * i + 1));
     }
-    return BuildPathWithYaw(seed_xy, raw_path);
+    return SeedOptimizationResult{BuildPathWithYaw(seed_xy, raw_path), false, false};
 }
 
 VectorVec4d ResamplePathUniform(const VectorVec4d& path, double step) {
@@ -340,6 +404,7 @@ bool PathCollisionFree(
 
 int main(int argc, char** argv) {
     try {
+        const auto cli_begin = std::chrono::steady_clock::now();
         const Args args = ParseArgs(argc, argv);
         const YAML::Node root = YAML::LoadFile(args.input_yaml);
         const YAML::Node map = root["map"];
@@ -427,7 +492,14 @@ int main(int argc, char** argv) {
         }
 
         VectorVec4d raw_path = LoadRawPath(root);
-        VectorVec4d seed_path = OptimizeSeedPathXY(raw_path, seed_xy_box_half_extent);
+        const auto seed_stage_begin = std::chrono::steady_clock::now();
+        const auto seed_result = OptimizeSeedPathXY(raw_path, seed_xy_box_half_extent);
+        VectorVec4d seed_path = seed_result.path;
+        bool seed_qp_init_fallback_raw = seed_result.qp_init_failed;
+        bool seed_qp_solve_fallback_raw = seed_result.qp_solve_failed;
+        bool seed_collision_fallback_raw = false;
+        bool resampled_seed_collision_fallback_raw = false;
+        bool smooth_collision_fallback_seed = false;
         if (!skip_seed_collision_check) {
             if (!PathCollisionFree(
                     occupancy_collision_flat,
@@ -439,12 +511,14 @@ int main(int argc, char** argv) {
                     origin_y,
                     seed_path)) {
                 std::cerr << "seed path collides with occupancy, fallback to raw path" << std::endl;
+                seed_collision_fallback_raw = true;
                 seed_path = raw_path;
             }
         }
         seed_path = ResamplePathUniform(seed_path, seed_resample_step);
+        const auto split_points = smoother.GetSmoothSegmentSplitPoints(seed_path);
         if (!args.split_points_csv.empty()) {
-            WriteSplitPointsCsv(args.split_points_csv, smoother.GetSmoothSegmentSplitPoints(seed_path));
+            WriteSplitPointsCsv(args.split_points_csv, split_points);
         }
         if (!skip_seed_collision_check) {
             if (!PathCollisionFree(
@@ -457,12 +531,15 @@ int main(int argc, char** argv) {
                     origin_y,
                     seed_path)) {
                 std::cerr << "resampled seed path collides with occupancy, fallback to raw path" << std::endl;
+                resampled_seed_collision_fallback_raw = true;
                 seed_path = raw_path;
             }
         }
         if (!args.seed_csv.empty()) {
             WritePathCsv(args.seed_csv, seed_path);
         }
+        const auto seed_stage_end = std::chrono::steady_clock::now();
+        const auto smooth_stage_begin = std::chrono::steady_clock::now();
         VectorVec4d smoothed_path = smoother.SmoothPath(seed_path);
         if (smoothed_path.empty()) {
             throw std::runtime_error("Smoother returned empty path");
@@ -477,9 +554,33 @@ int main(int argc, char** argv) {
                 origin_y,
                 smoothed_path)) {
             std::cerr << "smoothed path collides with occupancy, fallback to seed path" << std::endl;
+            smooth_collision_fallback_seed = true;
             smoothed_path = seed_path;
         }
+        const auto smooth_stage_end = std::chrono::steady_clock::now();
         WritePathCsv(args.output_csv, smoothed_path);
+        const double seed_stage_ms =
+            std::chrono::duration<double, std::milli>(seed_stage_end - seed_stage_begin).count();
+        const double smooth_stage_ms =
+            std::chrono::duration<double, std::milli>(smooth_stage_end - smooth_stage_begin).count();
+        const double total_cli_ms =
+            std::chrono::duration<double, std::milli>(smooth_stage_end - cli_begin).count();
+        if (!args.metrics_json.empty()) {
+            WriteMetricsJson(
+                args.metrics_json,
+                seed_stage_ms,
+                smooth_stage_ms,
+                total_cli_ms,
+                raw_path,
+                seed_path,
+                smoothed_path,
+                split_points.size(),
+                seed_qp_init_fallback_raw,
+                seed_qp_solve_fallback_raw,
+                seed_collision_fallback_raw,
+                resampled_seed_collision_fallback_raw,
+                smooth_collision_fallback_seed);
+        }
         if (!args.seed_csv.empty()) {
             std::cout << "saved_seed_csv=" << args.seed_csv << std::endl;
         }
@@ -490,6 +591,12 @@ int main(int argc, char** argv) {
         std::cout << "raw_points=" << raw_path.size() << std::endl;
         std::cout << "seed_points=" << seed_path.size() << std::endl;
         std::cout << "smoothed_points=" << smoothed_path.size() << std::endl;
+        std::cout << "seed_stage_ms=" << seed_stage_ms << std::endl;
+        std::cout << "smooth_stage_ms=" << smooth_stage_ms << std::endl;
+        std::cout << "total_cli_ms=" << total_cli_ms << std::endl;
+        if (!args.metrics_json.empty()) {
+            std::cout << "saved_metrics_json=" << args.metrics_json << std::endl;
+        }
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "smooth_path_cli error: " << e.what() << std::endl;
