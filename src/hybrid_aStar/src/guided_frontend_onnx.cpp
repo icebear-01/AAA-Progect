@@ -612,9 +612,13 @@ GridAstarResult RunGuidedGridAstar(const std::vector<int>& occupancy,
             }
 
             const bool is_diagonal = (neighbor_dx[dir] != 0 && neighbor_dy[dir] != 0);
-            if (is_diagonal && !options.allow_corner_cut) {
-                if (occupancy[FlatIndex(nx, current.xy.y(), width)] > 0 ||
-                    occupancy[FlatIndex(current.xy.x(), ny, width)] > 0) {
+            if (is_diagonal) {
+                const bool side_block_x = occupancy[FlatIndex(nx, current.xy.y(), width)] > 0;
+                const bool side_block_y = occupancy[FlatIndex(current.xy.x(), ny, width)] > 0;
+                if (side_block_x && side_block_y) {
+                    continue;
+                }
+                if (!options.allow_corner_cut && (side_block_x || side_block_y)) {
                     continue;
                 }
             }

@@ -1,0 +1,11 @@
+.venv
+**/*.egg-info/
+**/__pycache__/
+**/.pytest_cache/
+**/lightning_logs
+**/.ipynb_checkpoints/
+model
+outputs
+gif
+30x30
+12x12
