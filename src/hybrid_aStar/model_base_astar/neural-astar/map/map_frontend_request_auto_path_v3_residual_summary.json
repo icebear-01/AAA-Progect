@@ -1,0 +1,16 @@
+{
+  "ckpt": "/home/wmd/elevetor_demo0317/AAA-Progect/src/hybrid_aStar/model_base_astar/neural-astar/outputs/model_guidance_grid_mpd_unet_transformer_v3_rebuiltexpert_w035_sd5_p2_v2_policyfix_gpu_v1/best_eval_snapshot_epoch1.pt",
+  "start_grid": [
+    40,
+    80
+  ],
+  "goal_grid": [
+    220,
+    40
+  ],
+  "expanded_nodes": 3431,
+  "path_length_m": 49.349,
+  "path_points": 181,
+  "csv": "/home/wmd/elevetor_demo0317/AAA-Progect/src/hybrid_aStar/model_base_astar/neural-astar/map/map_frontend_request_auto_path_v3_residual.csv",
+  "overlay": "/home/wmd/elevetor_demo0317/AAA-Progect/src/hybrid_aStar/model_base_astar/neural-astar/map/map_frontend_request_auto_path_v3_residual_overlay.png"
+}

@@ -1,0 +1,28 @@
+{
+  "repeats": 20,
+  "baseline_octile": {
+    "success": true,
+    "expanded_nodes": 16000,
+    "search_time_ms_mean": 457.354,
+    "search_time_ms_std": 8.666,
+    "path_length_m": 113.573
+  },
+  "guided_frontend_costmap": {
+    "success": true,
+    "expanded_nodes": 16120,
+    "infer_time_ms_once": 746.919,
+    "search_time_ms_mean": 468.402,
+    "search_time_ms_std": 6.55,
+    "end_to_end_ms_once_plus_mean_search": 1215.321,
+    "path_length_m": 113.866
+  },
+  "guided_v3_residual": {
+    "success": true,
+    "expanded_nodes": 15913,
+    "infer_time_ms_once": 429.5,
+    "search_time_ms_mean": 459.874,
+    "search_time_ms_std": 8.941,
+    "end_to_end_ms_once_plus_mean_search": 889.374,
+    "path_length_m": 113.573
+  }
+}

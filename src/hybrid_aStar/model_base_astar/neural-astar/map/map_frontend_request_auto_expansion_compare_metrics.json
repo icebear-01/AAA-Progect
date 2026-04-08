@@ -1,0 +1,29 @@
+{
+  "start_grid": [
+    40,
+    80
+  ],
+  "goal_grid": [
+    220,
+    40
+  ],
+  "baseline_astar": {
+    "expanded_nodes": 2831,
+    "time_ms": 68.24830400000792,
+    "path_length_m": 49.142135623730965,
+    "success": true
+  },
+  "v3_native": {
+    "expanded_nodes": 2317,
+    "total_ms": 1264.4040040004256,
+    "path_length_m": 49.14213562373098,
+    "success": true
+  },
+  "v3_resize64": {
+    "expanded_nodes": 676,
+    "total_ms": 30.532636000316415,
+    "path_length_m": 49.14213562373098,
+    "success": true
+  },
+  "image": "/home/wmd/elevetor_demo0317/AAA-Progect/src/hybrid_aStar/model_base_astar/neural-astar/map/map_frontend_request_auto_expansion_compare.png"
+}

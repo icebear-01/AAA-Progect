@@ -24,6 +24,23 @@ def _box_filter_2d(arr: np.ndarray, kernel_size: int) -> np.ndarray:
     return (window_sum / max(denom, 1.0)).astype(np.float32)
 
 
+def _max_filter_bool_2d(arr: np.ndarray, kernel_size: int) -> np.ndarray:
+    if int(kernel_size) <= 1:
+        return np.asarray(arr, dtype=bool).copy()
+    if int(kernel_size) % 2 == 0:
+        raise ValueError(f"kernel_size must be odd, got {kernel_size}")
+
+    src = np.asarray(arr, dtype=bool)
+    h, w = src.shape
+    pad = int(kernel_size) // 2
+    padded = np.pad(src, pad_width=pad, mode="edge")
+    out = np.zeros_like(src, dtype=bool)
+    for dy in range(int(kernel_size)):
+        for dx in range(int(kernel_size)):
+            out |= padded[dy : dy + h, dx : dx + w]
+    return out
+
+
 def build_residual_confidence_map(
     residual_map: np.ndarray,
     occ_map: np.ndarray,
@@ -63,6 +80,51 @@ def build_residual_confidence_map(
     confidence[free_mask] = conf[free_mask]
     confidence[~free_mask] = 0.0
     return confidence.astype(np.float32)
+
+
+def apply_confidence_safety_gate(
+    confidence_map: np.ndarray | None,
+    occ_map: np.ndarray,
+    *,
+    gate_threshold: float = 0.0,
+    gate_kernel: int = 1,
+    low_scale: float = 0.0,
+    residual_map: np.ndarray | None = None,
+    residual_min: float = 0.0,
+) -> np.ndarray | None:
+    """Hard-gate low-confidence residual regions back toward baseline A*.
+
+    Cells with confidence below ``gate_threshold`` are downscaled by
+    ``low_scale``. When ``gate_kernel`` > 1, the low-confidence mask is dilated
+    to suppress risky residual neighborhoods instead of only isolated pixels.
+    """
+    if confidence_map is None:
+        return None
+    conf = np.clip(np.asarray(confidence_map, dtype=np.float32), 0.0, 1.0)
+    occ = np.asarray(occ_map, dtype=np.float32)
+    if conf.shape != occ.shape:
+        raise ValueError(f"Shape mismatch: confidence={conf.shape}, occ={occ.shape}")
+    if float(gate_threshold) <= 0.0:
+        conf[occ > 0.5] = 0.0
+        return conf.astype(np.float32)
+    if int(gate_kernel) <= 0 or int(gate_kernel) % 2 == 0:
+        raise ValueError(f"gate_kernel must be a positive odd integer, got {gate_kernel}")
+    if not (0.0 <= float(low_scale) <= 1.0):
+        raise ValueError(f"low_scale must be in [0, 1], got {low_scale}")
+
+    low_conf = conf < float(gate_threshold)
+    if float(residual_min) > 0.0:
+        if residual_map is None:
+            raise ValueError("residual_min > 0 requires residual_map")
+        residual = np.asarray(residual_map, dtype=np.float32)
+        if residual.shape != occ.shape:
+            raise ValueError(f"Shape mismatch: residual={residual.shape}, occ={occ.shape}")
+        low_conf &= residual >= float(residual_min)
+    low_conf = _max_filter_bool_2d(low_conf, kernel_size=int(gate_kernel))
+    gated = conf.copy()
+    gated[low_conf] *= float(low_scale)
+    gated[occ > 0.5] = 0.0
+    return gated.astype(np.float32)
 
 
 def resolve_residual_confidence_map(

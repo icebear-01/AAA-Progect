@@ -896,6 +896,15 @@ def parse_args() -> argparse.Namespace:
         help="Optional checkpoint used to initialize model weights before training.",
     )
     p.add_argument(
+        "--resume-ckpt",
+        type=Path,
+        default=None,
+        help=(
+            "Optional checkpoint used to resume training exactly, including model, optimizer, "
+            "scheduler, and starting epoch."
+        ),
+    )
+    p.add_argument(
         "--distill-teacher-ckpt",
         type=Path,
         default=None,
@@ -1246,6 +1255,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+
+    if args.resume_ckpt is not None and args.init_ckpt is not None:
+        raise ValueError("--resume-ckpt and --init-ckpt are mutually exclusive")
 
     if args.best_checkpoint_metric == "grid_astar_expanded" and (not args.compute_grid_astar_metric):
         raise ValueError(
@@ -1619,6 +1631,60 @@ def main() -> None:
         "val_grid_astar_sr": None,
         "val_grid_astar_expanded": None,
     }
+    start_epoch = 1
+
+    if best_ckpt.exists():
+        best_payload = torch.load(best_ckpt, map_location=device)
+        best_metric_name = str(best_payload.get("resolved_best_checkpoint_metric", "val_loss"))
+        _, best_score = resolve_best_checkpoint_score(
+            best_metric_name,
+            val_loss=best_payload.get("val_loss"),
+            val_grid_astar_sr=best_payload.get("val_grid_astar_sr"),
+            val_grid_astar_expanded=best_payload.get("val_grid_astar_expanded"),
+        )
+        best_metric_snapshot = {
+            "val_loss": float(best_payload.get("val_loss", float("inf"))),
+            "val_grid_astar_sr": best_payload.get("val_grid_astar_sr"),
+            "val_grid_astar_expanded": best_payload.get("val_grid_astar_expanded"),
+        }
+
+    if args.resume_ckpt is not None:
+        resume_payload = torch.load(args.resume_ckpt, map_location=device)
+        resume_state = resume_payload.get("model_state_dict", resume_payload)
+        resume_state, adapted_input_keys = _adapt_init_state_input_channels(model, resume_state)
+        load_res = model.load_state_dict(resume_state, strict=(not bool(adapted_input_keys)))
+        if adapted_input_keys:
+            print(f"resumed_with_adapted_input_channel_keys={adapted_input_keys}")
+        if adapted_input_keys:
+            missing = getattr(load_res, "missing_keys", [])
+            unexpected = getattr(load_res, "unexpected_keys", [])
+            if missing or unexpected:
+                print(f"partial_resume missing_keys={list(missing)} unexpected_keys={list(unexpected)}")
+        optimizer_state = resume_payload.get("optimizer_state_dict")
+        if optimizer_state is not None:
+            optimizer.load_state_dict(optimizer_state)
+        scheduler_state = resume_payload.get("scheduler_state_dict")
+        if scheduler is not None and scheduler_state is not None:
+            scheduler.load_state_dict(scheduler_state)
+        start_epoch = int(resume_payload.get("epoch", 0)) + 1
+        if best_score is None:
+            resume_metric_name = str(
+                resume_payload.get("resolved_best_checkpoint_metric", args.best_checkpoint_metric)
+            )
+            best_metric_name = resume_metric_name
+            _, best_score = resolve_best_checkpoint_score(
+                resume_metric_name,
+                val_loss=resume_payload.get("val_loss"),
+                val_grid_astar_sr=resume_payload.get("val_grid_astar_sr"),
+                val_grid_astar_expanded=resume_payload.get("val_grid_astar_expanded"),
+            )
+            best_metric_snapshot = {
+                "val_loss": float(resume_payload.get("val_loss", float("inf"))),
+                "val_grid_astar_sr": resume_payload.get("val_grid_astar_sr"),
+                "val_grid_astar_expanded": resume_payload.get("val_grid_astar_expanded"),
+            }
+        print(f"resumed_from={args.resume_ckpt}")
+        print(f"resume_start_epoch={start_epoch}")
 
     print(
         f"train_size={len(train_dataset)} val_size={len(val_dataset)} "
@@ -1645,7 +1711,15 @@ def main() -> None:
             f"scale={args.distill_scale_weight:.3f})"
         )
 
-    for epoch in range(1, args.epochs + 1):
+    if start_epoch > args.epochs:
+        print(
+            f"resume_start_epoch={start_epoch} exceeds --epochs={args.epochs}; "
+            "nothing to do."
+        )
+        print(f"best_ckpt={best_ckpt}")
+        return
+
+    for epoch in range(start_epoch, args.epochs + 1):
         train_metrics = _run_epoch(
             model=model,
             teacher_model=teacher_model,

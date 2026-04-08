@@ -1,0 +1,40 @@
+{
+  "map": "/home/wmd/elevetor_demo0317/AAA-Progect/src/hybrid_aStar/model_base_astar/neural-astar/map/map_frontend_request_auto.json",
+  "ckpt": "/home/wmd/elevetor_demo0317/AAA-Progect/src/hybrid_aStar/model_base_astar/neural-astar/outputs/model_guidance_grid_mpd_unet_transformer_v3_rebuiltexpert_w035_sd5_p2_v2_policyfix_gpu_v1/best_eval_snapshot_epoch1.pt",
+  "mode_note": "guided uses current frontend path: infer_cost_map + lambda_guidance=1.0 + g_cost + octile + no_corner_cut",
+  "start_grid": [
+    124,
+    98
+  ],
+  "goal_grid": [
+    0,
+    0
+  ],
+  "baseline": {
+    "success": true,
+    "expanded_nodes": 16000,
+    "search_time_ms": 445.297,
+    "path_length_cells": 454.291,
+    "path_length_m": 113.573,
+    "path_points": 406
+  },
+  "guided": {
+    "success": true,
+    "expanded_nodes": 16120,
+    "infer_time_ms": 693.996,
+    "search_time_ms": 474.478,
+    "end_to_end_ms": 1168.475,
+    "path_length_cells": 455.463,
+    "path_length_m": 113.866,
+    "path_points": 408
+  },
+  "delta": {
+    "expanded_nodes": 120,
+    "expanded_reduction_pct": -0.75,
+    "search_time_ms": 29.182,
+    "search_time_reduction_pct": -6.553,
+    "end_to_end_vs_baseline_ms": 723.178,
+    "path_length_cells": 1.172,
+    "path_length_m": 0.293
+  }
+}

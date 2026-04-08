@@ -20,6 +20,7 @@ import yaml
 from matplotlib.colors import ListedColormap, to_rgba
 from matplotlib import patheffects as pe
 from matplotlib import font_manager as fm
+from matplotlib.ticker import LinearLocator
 from matplotlib.lines import Line2D
 
 
@@ -1199,6 +1200,7 @@ def plot_curvature_compare(
     split_world_points: Sequence[Tuple[int, float, float]] = (),
     show_legend: bool = False,
     curvature_limit: float = 1.0,
+    plot_smooth_window_m: float = 0.0,
 ) -> None:
     plt.rcParams["axes.unicode_minus"] = False
     font_prop = fm.FontProperties(fname=str(CJK_FONT_PATH)) if CJK_FONT_PATH.exists() else None
@@ -1218,10 +1220,35 @@ def plot_curvature_compare(
     ]
     if include_raw_path:
         curve_specs.insert(0, ("前端路径", raw_world_path, "#4C78A8", "--", 1.6))
+
+    def smooth_plot_curve(values: np.ndarray, s_axis: np.ndarray) -> np.ndarray:
+        if values.size < 3 or s_axis.size != values.size or plot_smooth_window_m <= 1e-6:
+            return np.asarray(values, dtype=np.float64)
+        if s_axis.size >= 2:
+            step_m = float(np.median(np.diff(s_axis)))
+        else:
+            step_m = 0.10
+        step_m = max(step_m, 1e-6)
+        window = max(3, int(round(plot_smooth_window_m / step_m)))
+        if window % 2 == 0:
+            window += 1
+        if window >= values.size:
+            window = values.size if values.size % 2 == 1 else max(3, values.size - 1)
+        if window < 3:
+            return np.asarray(values, dtype=np.float64)
+        kernel = np.hanning(window)
+        if float(kernel.sum()) <= 1e-12:
+            kernel = np.ones((window,), dtype=np.float64)
+        kernel = kernel / float(kernel.sum())
+        pad = window // 2
+        padded = np.pad(np.asarray(values, dtype=np.float64), (pad, pad), mode="edge")
+        return np.convolve(padded, kernel, mode="valid")
+
     for label, path, color, linestyle, linewidth in curve_specs:
         s, kappa = curvature_profile(path)
         if s.size == 0:
             continue
+        kappa = smooth_plot_curve(kappa, s)
         ax.plot(
             s,
             kappa,
@@ -1310,11 +1337,15 @@ def plot_heading_compare(
     out_path: Path,
     split_world_points: Sequence[Tuple[int, float, float]] = (),
     target_center_deg: float = -200.0,
+    show_legend: bool = True,
+    plot_smooth_window_m: float = 0.0,
+    align_to_raw_reference_s: bool = True,
+    tick_font_size_override: int | None = None,
 ) -> None:
     plt.rcParams["axes.unicode_minus"] = False
     font_prop = fm.FontProperties(fname=str(CJK_FONT_PATH)) if CJK_FONT_PATH.exists() else None
     paper_font_size = 14
-    tick_font_size = 18
+    tick_font_size = 18 if tick_font_size_override is None else int(tick_font_size_override)
     fig, ax = plt.subplots(1, 1, figsize=(8.3, 4.6), facecolor="#fcfcfb")
     ax.set_facecolor("#fcfcfb")
     for spine in ax.spines.values():
@@ -1326,6 +1357,30 @@ def plot_heading_compare(
     raw_s_ref, raw_heading_deg = heading_profile(raw_world_path)
     raw_heading_wrapped = normalize_heading_branch(raw_heading_deg, target_center_deg)
     plotted_headings: List[np.ndarray] = []
+
+    def smooth_plot_heading(values: np.ndarray, s_axis: np.ndarray) -> np.ndarray:
+        if values.size < 3 or s_axis.size != values.size or plot_smooth_window_m <= 1e-6:
+            return np.asarray(values, dtype=np.float64)
+        if s_axis.size >= 2:
+            step_m = float(np.median(np.diff(s_axis)))
+        else:
+            step_m = 0.10
+        step_m = max(step_m, 1e-6)
+        window = max(3, int(round(plot_smooth_window_m / step_m)))
+        if window % 2 == 0:
+            window += 1
+        if window >= values.size:
+            window = values.size if values.size % 2 == 1 else max(3, values.size - 1)
+        if window < 3:
+            return np.asarray(values, dtype=np.float64)
+        kernel = np.hanning(window)
+        if float(kernel.sum()) <= 1e-12:
+            kernel = np.ones((window,), dtype=np.float64)
+        kernel = kernel / float(kernel.sum())
+        pad = window // 2
+        padded = np.pad(np.asarray(values, dtype=np.float64), (pad, pad), mode="edge")
+        return np.convolve(padded, kernel, mode="valid")
+
     curve_specs = [
         ("前端路径", raw_s_ref, raw_heading_wrapped, "#4C78A8", "--", 1.6),
         ("初始路径", *heading_profile(seed_world_path), "#E69F00", "-", 1.7),
@@ -1334,13 +1389,14 @@ def plot_heading_compare(
     for label, s_src, heading_src, color, linestyle, linewidth in curve_specs:
         if s_src.size == 0:
             continue
-        if raw_s_ref.size > 0 and label != "前端路径":
+        if align_to_raw_reference_s and raw_s_ref.size > 0 and label != "前端路径":
             plot_s = raw_s_ref
             plot_heading = interpolate_profile_to_reference(raw_s_ref, s_src, heading_src)
             plot_heading = normalize_heading_branch(plot_heading, target_center_deg)
         else:
             plot_s = s_src
             plot_heading = normalize_heading_branch(heading_src, target_center_deg)
+        plot_heading = smooth_plot_heading(plot_heading, plot_s)
         ax.plot(
             plot_s,
             plot_heading,
@@ -1386,29 +1442,30 @@ def plot_heading_compare(
     ax.set_xlabel("纵向位移 [m]", **label_kwargs)
     ax.set_ylabel("航向角 [deg]", **label_kwargs)
 
-    legend_font_size = 16
-    legend_kwargs = dict(
-        loc="lower right",
-        bbox_to_anchor=(0.98, 0.04),
-        fontsize=legend_font_size,
-        framealpha=0.96,
-        facecolor="#ffffff",
-        edgecolor="#cfd6de",
-        borderpad=0.35,
-        labelspacing=0.35,
-        handlelength=1.9,
-        handletextpad=0.5,
-        borderaxespad=0.0,
-        ncol=1,
-    )
-    if font_prop is not None:
-        legend_kwargs["prop"] = fm.FontProperties(fname=str(CJK_FONT_PATH), size=legend_font_size)
-        legend_kwargs.pop("fontsize", None)
-    legend = ax.legend(**legend_kwargs)
-    if font_prop is not None:
-        for text in legend.get_texts():
-            text.set_fontproperties(font_prop)
-            text.set_fontsize(legend_font_size)
+    if show_legend:
+        legend_font_size = 16
+        legend_kwargs = dict(
+            loc="lower right",
+            bbox_to_anchor=(0.98, 0.04),
+            fontsize=legend_font_size,
+            framealpha=0.96,
+            facecolor="#ffffff",
+            edgecolor="#cfd6de",
+            borderpad=0.35,
+            labelspacing=0.35,
+            handlelength=1.9,
+            handletextpad=0.5,
+            borderaxespad=0.0,
+            ncol=1,
+        )
+        if font_prop is not None:
+            legend_kwargs["prop"] = fm.FontProperties(fname=str(CJK_FONT_PATH), size=legend_font_size)
+            legend_kwargs.pop("fontsize", None)
+        legend = ax.legend(**legend_kwargs)
+        if font_prop is not None:
+            for text in legend.get_texts():
+                text.set_fontproperties(font_prop)
+                text.set_fontsize(legend_font_size)
 
     fig.subplots_adjust(left=0.12, right=0.985, bottom=0.18, top=0.95)
     fig.savefig(out_path, dpi=PLOT_DPI, facecolor=fig.get_facecolor(), bbox_inches="tight")
@@ -1421,14 +1478,21 @@ def plot_xy_trajectory_compare(
     seed_world_path: Sequence[Tuple[float, float]],
     smoothed_world_path: Sequence[Tuple[float, float]],
     out_path: Path,
+    show_legend: bool = True,
+    y_grid_cells: int | None = None,
+    equal_aspect: bool = True,
+    figsize: tuple[float, float] | None = None,
+    linewidth_scale: float = 1.0,
+    tick_font_size_override: int | None = None,
 ) -> None:
     plt.rcParams["axes.unicode_minus"] = False
     font_prop = fm.FontProperties(fname=str(CJK_FONT_PATH)) if CJK_FONT_PATH.exists() else None
     paper_font_size = 12
-    tick_font_size = 15
+    tick_font_size = 15 if tick_font_size_override is None else int(tick_font_size_override)
     legend_font_size = 14
     legend_font_prop = fm.FontProperties(fname=str(CJK_FONT_PATH), size=legend_font_size) if CJK_FONT_PATH.exists() else None
-    fig, ax = plt.subplots(1, 1, figsize=(6.8, 6.0), facecolor="#fcfcfb")
+    fig_width, fig_height = figsize if figsize is not None else (6.8, 6.0)
+    fig, ax = plt.subplots(1, 1, figsize=(fig_width, fig_height), facecolor="#fcfcfb")
     ax.set_facecolor("#fcfcfb")
     for spine in ax.spines.values():
         spine.set_linewidth(0.9)
@@ -1450,11 +1514,16 @@ def plot_xy_trajectory_compare(
             arr[:, 1],
             color=color,
             linestyle=linestyle,
-            linewidth=linewidth,
+            linewidth=linewidth * max(0.1, float(linewidth_scale)),
             label=label,
         )
 
-    ax.set_aspect("equal", adjustable="box")
+    if equal_aspect:
+        ax.set_aspect("equal", adjustable="box")
+    else:
+        ax.set_aspect("auto")
+    if y_grid_cells is not None and y_grid_cells >= 2:
+        ax.yaxis.set_major_locator(LinearLocator(y_grid_cells + 1))
     ax.tick_params(axis="both", labelsize=tick_font_size, colors="#3d4148")
     for label in ax.get_xticklabels() + ax.get_yticklabels():
         if font_prop is not None:
@@ -1467,25 +1536,26 @@ def plot_xy_trajectory_compare(
     ax.set_xlabel("X 坐标 [m]", **label_kwargs)
     ax.set_ylabel("Y 坐标 [m]", **label_kwargs)
 
-    legend_kwargs = dict(
-        loc="lower left",
-        bbox_to_anchor=(0.04, 0.04),
-        fontsize=legend_font_size,
-        framealpha=0.96,
-        facecolor="#ffffff",
-        edgecolor="#cfd6de",
-        borderpad=0.7,
-        labelspacing=0.6,
-        handlelength=2.6,
-        borderaxespad=0.0,
-    )
-    if legend_font_prop is not None:
-        legend_kwargs["prop"] = legend_font_prop
-        legend_kwargs.pop("fontsize", None)
-    legend = ax.legend(**legend_kwargs)
-    if legend_font_prop is not None:
-        for text in legend.get_texts():
-            text.set_fontproperties(legend_font_prop)
+    if show_legend:
+        legend_kwargs = dict(
+            loc="lower left",
+            bbox_to_anchor=(0.04, 0.04),
+            fontsize=legend_font_size,
+            framealpha=0.96,
+            facecolor="#ffffff",
+            edgecolor="#cfd6de",
+            borderpad=0.7,
+            labelspacing=0.6,
+            handlelength=2.6,
+            borderaxespad=0.0,
+        )
+        if legend_font_prop is not None:
+            legend_kwargs["prop"] = legend_font_prop
+            legend_kwargs.pop("fontsize", None)
+        legend = ax.legend(**legend_kwargs)
+        if legend_font_prop is not None:
+            for text in legend.get_texts():
+                text.set_fontproperties(legend_font_prop)
 
     fig.subplots_adjust(left=0.14, right=0.98, bottom=0.13, top=0.97)
     fig.savefig(out_path, dpi=PLOT_DPI, facecolor=fig.get_facecolor(), bbox_inches="tight")

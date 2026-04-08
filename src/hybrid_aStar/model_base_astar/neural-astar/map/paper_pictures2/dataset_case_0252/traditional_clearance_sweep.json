@@ -1,0 +1,125 @@
+{
+  "base": {
+    "safe": 2.0,
+    "power": 1.0,
+    "weight": 0.0,
+    "success": 1,
+    "expanded": 1298,
+    "len": 76.11269837220806,
+    "clr_mean": 4.3387837409973145,
+    "clr_min": 1.0
+  },
+  "best": {
+    "safe": 4.0,
+    "power": 2.0,
+    "weight": 0.3,
+    "success": 1,
+    "expanded": 1474,
+    "len": 76.94112549695426,
+    "clr_mean": 5.009961128234863,
+    "clr_min": 1.0
+  },
+  "top10": [
+    {
+      "safe": 4.0,
+      "power": 2.0,
+      "weight": 0.3,
+      "success": 1,
+      "expanded": 1474,
+      "len": 76.94112549695426,
+      "clr_mean": 5.009961128234863,
+      "clr_min": 1.0
+    },
+    {
+      "safe": 3.0,
+      "power": 1.0,
+      "weight": 0.2,
+      "success": 1,
+      "expanded": 1449,
+      "len": 76.94112549695426,
+      "clr_mean": 4.996206760406494,
+      "clr_min": 1.0
+    },
+    {
+      "safe": 3.0,
+      "power": 1.0,
+      "weight": 0.3,
+      "success": 1,
+      "expanded": 1466,
+      "len": 76.94112549695426,
+      "clr_mean": 4.996206760406494,
+      "clr_min": 1.0
+    },
+    {
+      "safe": 4.0,
+      "power": 2.0,
+      "weight": 0.02,
+      "success": 1,
+      "expanded": 1332,
+      "len": 76.11269837220807,
+      "clr_mean": 4.78937292098999,
+      "clr_min": 1.0
+    },
+    {
+      "safe": 4.0,
+      "power": 1.0,
+      "weight": 0.03,
+      "success": 1,
+      "expanded": 1351,
+      "len": 76.11269837220807,
+      "clr_mean": 4.78937292098999,
+      "clr_min": 1.0
+    },
+    {
+      "safe": 5.0,
+      "power": 2.0,
+      "weight": 0.05,
+      "success": 1,
+      "expanded": 1363,
+      "len": 76.11269837220807,
+      "clr_mean": 4.78937292098999,
+      "clr_min": 1.0
+    },
+    {
+      "safe": 5.0,
+      "power": 2.0,
+      "weight": 0.03,
+      "success": 1,
+      "expanded": 1340,
+      "len": 76.11269837220807,
+      "clr_mean": 4.783947467803955,
+      "clr_min": 1.0
+    },
+    {
+      "safe": 5.0,
+      "power": 1.0,
+      "weight": 0.08,
+      "success": 1,
+      "expanded": 1431,
+      "len": 76.11269837220807,
+      "clr_mean": 4.783947467803955,
+      "clr_min": 1.0
+    },
+    {
+      "safe": 5.0,
+      "power": 1.0,
+      "weight": 0.1,
+      "success": 1,
+      "expanded": 1452,
+      "len": 76.11269837220807,
+      "clr_mean": 4.783947467803955,
+      "clr_min": 1.0
+    },
+    {
+      "safe": 5.0,
+      "power": 2.0,
+      "weight": 0.2,
+      "success": 1,
+      "expanded": 1476,
+      "len": 76.11269837220809,
+      "clr_mean": 4.783947467803955,
+      "clr_min": 1.0
+    }
+  ],
+  "all_count": 80
+}

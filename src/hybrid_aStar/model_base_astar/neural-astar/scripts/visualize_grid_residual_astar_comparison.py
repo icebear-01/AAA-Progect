@@ -71,6 +71,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ckpt", type=Path, required=True)
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--max-samples", type=int, default=400)
+    parser.add_argument("--case-indices", type=int, nargs="*", default=None)
     parser.add_argument("--residual-weight", type=float, default=1.25)
     parser.add_argument(
         "--residual-confidence-mode",
@@ -428,6 +429,14 @@ def main() -> None:
         )
 
     eval_count = len(dataset) if int(args.max_samples) <= 0 else min(len(dataset), int(args.max_samples))
+    if args.case_indices:
+        eval_indices = []
+        for idx in args.case_indices:
+            if idx < 0 or idx >= eval_count:
+                raise ValueError(f"case index out of range: {idx} (eval_count={eval_count})")
+            eval_indices.append(int(idx))
+    else:
+        eval_indices = list(range(eval_count))
     device = args.device
     if device == "cuda" and not torch.cuda.is_available():
         device = "cpu"
@@ -435,11 +444,11 @@ def main() -> None:
     if getattr(model, "output_mode", "cost_map") != "residual_heuristic":
         raise ValueError("Expected residual-heuristic checkpoint for visualization.")
 
-    samples: List[Dict[str, torch.Tensor]] = []
+    samples: Dict[int, Dict[str, torch.Tensor]] = {}
     cases: List[CaseEval] = []
-    for idx in range(eval_count):
+    for pos, idx in enumerate(eval_indices):
         sample = dataset[idx]
-        samples.append(sample)
+        samples[idx] = sample
         occ = sample["occ_map"].numpy()[0].astype(np.float32)
         start_xy = _onehot_xy(sample["start_map"])
         goal_xy = _onehot_xy(sample["goal_map"])
@@ -504,19 +513,24 @@ def main() -> None:
                 oracle=PlannerStats(label="oracle", stats=oracle.stats, runtime_ms=oracle.runtime_ms),
             )
         )
-        if idx % 32 == 0 or idx + 1 == eval_count:
-            print(f"processed={idx + 1}/{eval_count}")
+        if pos % 32 == 0 or pos + 1 == len(eval_indices):
+            print(f"processed={pos + 1}/{len(eval_indices)}")
 
-    selected = _select_case_indices(cases)
-    row_labels = ["改善最明显", "典型案例", "退化最明显"]
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    for row_label, pos in zip(row_labels, selected):
-        case = cases[pos]
+    if args.case_indices:
+        selected_cases = cases
+        row_labels = [f"指定案例{i + 1}" for i in range(len(selected_cases))]
+    else:
+        selected = _select_case_indices(cases)
+        selected_cases = [cases[pos] for pos in selected]
+        row_labels = ["改善最明显", "典型案例", "退化最明显"]
+
+    for row_label, case in zip(row_labels, selected_cases):
         out_stem = {
             "改善最明显": "most_improved",
             "典型案例": "typical",
             "退化最明显": "most_regressed",
-        }[row_label]
+        }.get(row_label, "selected_case")
         out_path = args.output_dir / f"{out_stem}_idx{case.idx:04d}.png"
         _save_case_figure(row_label, case, samples[case.idx], out_path, font_prop, int(args.dpi))
 

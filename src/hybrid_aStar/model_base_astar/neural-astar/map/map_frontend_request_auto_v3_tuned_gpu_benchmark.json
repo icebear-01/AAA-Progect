@@ -1,0 +1,50 @@
+{
+  "map_json": "/home/wmd/elevetor_demo0317/AAA-Progect/src/hybrid_aStar/model_base_astar/neural-astar/map/map_frontend_request_auto.json",
+  "ckpt": "/home/wmd/elevetor_demo0317/AAA-Progect/src/hybrid_aStar/model_base_astar/neural-astar/outputs/model_guidance_grid_mpd_unet_transformer_v3_rebuiltexpert_w035_sd5_p2_v2_policyfix_gpu_v1/best_eval_snapshot_epoch1.pt",
+  "start_grid": [
+    40,
+    80
+  ],
+  "goal_grid": [
+    220,
+    40
+  ],
+  "residual_weight": 0.15,
+  "confidence_mode": "learned",
+  "repeat": 20,
+  "warmup": 3,
+  "baseline_astar": {
+    "expanded_nodes": 2831,
+    "search_time_ms": 84.37874599985662,
+    "path_length_m": 49.142135623730965,
+    "path_points": 181
+  },
+  "v3_cpu": {
+    "device": "cpu",
+    "infer_ms_avg": 485.3211669000302,
+    "infer_ms_std": 128.33857802768625,
+    "infer_ms_min": 403.6508290000711,
+    "infer_ms_max": 979.539466999995,
+    "search_time_ms": 53.56843299978209,
+    "end_to_end_ms": 538.8895998998123,
+    "expanded_nodes": 2317,
+    "path_length_m": 49.14213562373098,
+    "path_points": 181
+  },
+  "v3_gpu": {
+    "device": "cuda",
+    "infer_ms_avg": 27.342730849932195,
+    "infer_ms_std": 0.5670073929587207,
+    "infer_ms_min": 26.346631999331294,
+    "infer_ms_max": 28.568933000315155,
+    "search_time_ms": 59.74313000024267,
+    "end_to_end_ms": 87.08586085017487,
+    "expanded_nodes": 2317,
+    "path_length_m": 49.14213562373098,
+    "path_points": 181
+  },
+  "gpu_speedup_vs_cpu_infer": 17.749549946699407,
+  "overlay": "/home/wmd/elevetor_demo0317/AAA-Progect/src/hybrid_aStar/model_base_astar/neural-astar/map/map_frontend_request_auto_compare_tuned_cpu_gpu_overlay.png",
+  "cpu_csv": "/home/wmd/elevetor_demo0317/AAA-Progect/src/hybrid_aStar/model_base_astar/neural-astar/map/map_frontend_request_auto_path_v3_tuned_w015_learned_cpu_benchmark.csv",
+  "gpu_csv": "/home/wmd/elevetor_demo0317/AAA-Progect/src/hybrid_aStar/model_base_astar/neural-astar/map/map_frontend_request_auto_path_v3_tuned_w015_learned_gpu.csv"
+}

@@ -1,0 +1,20 @@
+{
+  "seed_stage_ms": 2.1108,
+  "smooth_stage_ms": 39.2418,
+  "total_cli_ms": 432.479,
+  "raw_points": 181,
+  "seed_points": 575,
+  "smoothed_points": 575,
+  "raw_length_m": 49.1421,
+  "seed_length_m": 48.2369,
+  "smoothed_length_m": 47.2354,
+  "segment_split_points": 2,
+  "seed_qp_init_fallback_raw": false,
+  "seed_qp_solve_fallback_raw": false,
+  "seed_collision_fallback_raw": false,
+  "resampled_seed_collision_fallback_raw": false,
+  "smooth_collision_fallback_seed": false,
+  "seed_success": true,
+  "smooth_success": true,
+  "backend_success": true
+}

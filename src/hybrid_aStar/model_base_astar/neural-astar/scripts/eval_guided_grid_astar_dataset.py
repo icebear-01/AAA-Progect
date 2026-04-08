@@ -16,7 +16,10 @@ from hybrid_astar_guided.grid_astar import astar_8conn_stats, path_length_8conn
 from neural_astar.api.guidance_infer import load_guidance_encoder
 from neural_astar.datasets import ParkingGuidanceDataset, PlanningNPZGuidanceDataset
 from neural_astar.utils.guidance_targets import build_clearance_input_map
-from neural_astar.utils.residual_confidence import resolve_residual_confidence_map
+from neural_astar.utils.residual_confidence import (
+    apply_confidence_safety_gate,
+    resolve_residual_confidence_map,
+)
 from neural_astar.utils.residual_prediction import (
     apply_residual_scale_np,
     decode_residual_prediction_np,
@@ -130,6 +133,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--residual-confidence-kernel", type=int, default=5)
     p.add_argument("--residual-confidence-strength", type=float, default=0.75)
     p.add_argument("--residual-confidence-min", type=float, default=0.25)
+    p.add_argument("--safety-gate-threshold", type=float, default=0.0)
+    p.add_argument("--safety-gate-kernel", type=int, default=1)
+    p.add_argument("--safety-gate-low-scale", type=float, default=0.0)
+    p.add_argument("--safety-gate-residual-min", type=float, default=0.0)
     p.add_argument("--csv-out", type=Path, default=None)
     p.set_defaults(allow_corner_cut=True)
     return p.parse_args()
@@ -409,6 +416,15 @@ def main() -> None:
                 kernel_size=args.residual_confidence_kernel,
                 strength=args.residual_confidence_strength,
                 min_confidence=args.residual_confidence_min,
+            )
+            residual_confidence_map = apply_confidence_safety_gate(
+                residual_confidence_map,
+                occ_map=occ,
+                gate_threshold=args.safety_gate_threshold,
+                gate_kernel=args.safety_gate_kernel,
+                low_scale=args.safety_gate_low_scale,
+                residual_map=heuristic_residual_map,
+                residual_min=args.safety_gate_residual_min,
             )
 
         ok, expanded, runtime_ms, path_len = _evaluate_one(

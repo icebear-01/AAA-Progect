@@ -1,0 +1,2 @@
+idx,start_x,start_y,goal_x,goal_y,astar_expanded,improved_expanded,v3_expanded,v3_minus_astar,v3_minus_improved,astar_path_length,improved_path_length,v3_path_length,residual_max,residual_p95,conf_min,conf_mean,conf_mean_top_residual,effective_mean_top_residual
+252,62,44,11,6,1474,1336,549,-925,-787,76.11269837220809,76.11269837220807,76.11269837220806,42.79411315917969,14.659454584121704,0.0,0.7588006854057312,0.8678582906723022,28.08909034729004

@@ -1,0 +1,48 @@
+{
+  "start_grid": [
+    40,
+    80
+  ],
+  "goal_grid": [
+    220,
+    40
+  ],
+  "methods": {
+    "traditional_astar": {
+      "label": "传统A*",
+      "expanded_nodes": 5073,
+      "time_ms": 119.56287599969073,
+      "path_length_m": 49.14213562373096,
+      "success": true
+    },
+    "improved_astar": {
+      "label": "改进A*",
+      "expanded_nodes": 2831,
+      "time_ms": 68.08660600017902,
+      "path_length_m": 49.142135623730965,
+      "success": true
+    },
+    "greedy_best_first": {
+      "label": "贪心搜索",
+      "expanded_nodes": 211,
+      "time_ms": 4.5115330003682175,
+      "path_length_m": 52.85965004500318,
+      "success": true
+    },
+    "dijkstra": {
+      "label": "Dijkstra",
+      "expanded_nodes": 20210,
+      "time_ms": 471.1539720001383,
+      "path_length_m": 49.14213562373096,
+      "success": true
+    },
+    "ours": {
+      "label": "本文方法64×64",
+      "expanded_nodes": 676,
+      "time_ms": 769.4961509987479,
+      "path_length_m": 49.14213562373098,
+      "success": true
+    }
+  },
+  "image": "/home/wmd/elevetor_demo0317/AAA-Progect/src/hybrid_aStar/model_base_astar/neural-astar/map/map_frontend_request_auto_classic_expansion_compare.png"
+}

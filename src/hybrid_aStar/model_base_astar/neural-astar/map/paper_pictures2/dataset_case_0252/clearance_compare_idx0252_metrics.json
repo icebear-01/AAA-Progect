@@ -1,0 +1,12 @@
+{
+  "base_expanded": 549,
+  "base_clearance_mean": 4.037171840667725,
+  "base_clearance_min": 1.0,
+  "best_expanded": 555,
+  "best_clearance_mean": 4.395517826080322,
+  "best_clearance_min": 1.0,
+  "best_clearance_weight": 0.2,
+  "best_clearance_safe_distance": 2.0,
+  "best_clearance_power": 1.0,
+  "path_length_same": true
+}

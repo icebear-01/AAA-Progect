@@ -1,0 +1,19 @@
+{
+  "base": {
+    "expanded_nodes": 676,
+    "path_length_m": 49.14213562373098,
+    "path_points": 181
+  },
+  "clearance": {
+    "expanded_nodes": 671,
+    "path_length_m": 49.14213562373098,
+    "path_points": 181
+  },
+  "clearance_params": {
+    "weight": 0.2,
+    "safe_distance": 3.0,
+    "power": 2.0,
+    "integration_mode": "g_cost"
+  },
+  "csv": "/home/wmd/elevetor_demo0317/AAA-Progect/src/hybrid_aStar/model_base_astar/neural-astar/map/map_frontend_request_auto_path_v3_tuned_w015_learned_resize64_clearance.csv"
+}

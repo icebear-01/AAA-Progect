@@ -1,0 +1,36 @@
+{
+  "map_json": "/home/wmd/elevetor_demo0317/AAA-Progect/src/hybrid_aStar/model_base_astar/neural-astar/map/map_frontend_request_auto.json",
+  "ckpt": "/home/wmd/elevetor_demo0317/AAA-Progect/src/hybrid_aStar/model_base_astar/neural-astar/outputs/model_guidance_grid_mpd_unet_transformer_v3_rebuiltexpert_w035_sd5_p2_v2_policyfix_gpu_v1/best_eval_snapshot_epoch1.pt",
+  "start_grid": [
+    40,
+    80
+  ],
+  "goal_grid": [
+    220,
+    40
+  ],
+  "baseline": {
+    "expanded_nodes": 2831,
+    "search_time_ms": 77.67718500053888,
+    "path_length_m": 49.142135623730965,
+    "path_points": 181,
+    "csv": "/home/wmd/elevetor_demo0317/AAA-Progect/src/hybrid_aStar/model_base_astar/neural-astar/map/map_frontend_request_auto_path_astar_baseline.csv"
+  },
+  "v3_tuned": {
+    "mode": "learned",
+    "residual_weight": 0.15,
+    "expanded_nodes": 2317,
+    "infer_time_ms": 2135.4417980001017,
+    "search_time_ms": 74.32585900005506,
+    "end_to_end_ms": 2209.7676570001568,
+    "path_length_m": 49.14213562373098,
+    "path_points": 181,
+    "csv": "/home/wmd/elevetor_demo0317/AAA-Progect/src/hybrid_aStar/model_base_astar/neural-astar/map/map_frontend_request_auto_path_v3_tuned_w015_learned.csv"
+  },
+  "delta": {
+    "expanded_nodes": -514,
+    "expanded_reduction_pct": 18.156128576474742,
+    "path_length_m": 1.4210854715202004e-14
+  },
+  "overlay": "/home/wmd/elevetor_demo0317/AAA-Progect/src/hybrid_aStar/model_base_astar/neural-astar/map/map_frontend_request_auto_compare_tuned_overlay.png"
+}

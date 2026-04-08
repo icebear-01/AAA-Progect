@@ -1,0 +1,26 @@
+{
+  "request_json": "/home/wmd/elevetor_demo0317/AAA-Progect/src/hybrid_aStar/model_base_astar/neural-astar/map/paper_pictures2/data/map_request_goal_shifted.json",
+  "ckpt": "/home/wmd/elevetor_demo0317/AAA-Progect/src/hybrid_aStar/model_base_astar/neural-astar/outputs/model_guidance_grid_mpd_unet_transformer_v3_rebuiltexpert_w035_sd5_p2_v2_policyfix_gpu_v1/best_eval_snapshot_epoch1.pt",
+  "start_grid": [
+    40,
+    80
+  ],
+  "goal_grid": [
+    220,
+    30
+  ],
+  "infer_ms": 680.1175680000142,
+  "raw": {
+    "expanded_nodes": 1282,
+    "search_time_ms": 28.171170999939932,
+    "path_length_m": 50.17766952966373
+  },
+  "final": {
+    "expanded_nodes": 1494,
+    "search_time_ms": 38.51355799997691,
+    "path_length_m": 50.17766952966374
+  },
+  "residual_max": 15.243896484375,
+  "confidence_mean": 0.8901159763336182,
+  "effective_max": 1.8852518796920776
+}

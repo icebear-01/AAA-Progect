@@ -1,0 +1,3 @@
+method,success,expanded_nodes,infer_time_ms,search_time_ms,end_to_end_ms,path_length_cells,path_length_m,path_points
+baseline,1,16000,0.0,445.297,445.297,454.291,113.573,406
+guided,1,16120,693.996,474.478,1168.475,455.463,113.866,408

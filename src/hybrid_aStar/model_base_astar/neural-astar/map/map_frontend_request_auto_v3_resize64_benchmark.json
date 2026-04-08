@@ -1,0 +1,47 @@
+{
+  "device": "cuda",
+  "map_json": "/home/wmd/elevetor_demo0317/AAA-Progect/src/hybrid_aStar/model_base_astar/neural-astar/map/map_frontend_request_auto.json",
+  "ckpt": "/home/wmd/elevetor_demo0317/AAA-Progect/src/hybrid_aStar/model_base_astar/neural-astar/outputs/model_guidance_grid_mpd_unet_transformer_v3_rebuiltexpert_w035_sd5_p2_v2_policyfix_gpu_v1/best_eval_snapshot_epoch1.pt",
+  "start_grid": [
+    40,
+    80
+  ],
+  "goal_grid": [
+    220,
+    40
+  ],
+  "target_size": [
+    64,
+    64
+  ],
+  "baseline_astar": {
+    "expanded_nodes": 2831,
+    "search_time_ms": 62.130295999850205,
+    "path_length_m": 49.142135623730965,
+    "path_points": 181
+  },
+  "native_fullres": {
+    "infer_ms_avg": 26.71298560003379,
+    "infer_ms_std": 0.6754020970986788,
+    "search_time_ms": 63.699368000015966,
+    "end_to_end_ms": 90.41235360004976,
+    "expanded_nodes": 2317,
+    "path_length_m": 49.14213562373098,
+    "path_points": 181
+  },
+  "resize64_then_upsample": {
+    "infer_ms_avg": 8.384795299980397,
+    "infer_ms_std": 1.387610435429967,
+    "search_time_ms": 15.217540000776353,
+    "end_to_end_ms": 23.60233530075675,
+    "expanded_nodes": 676,
+    "path_length_m": 49.14213562373098,
+    "path_points": 181
+  },
+  "delta_resize64_vs_native": {
+    "expanded_nodes": -1641,
+    "path_length_m": 0.0,
+    "infer_ms_avg": -18.328190300053393,
+    "end_to_end_ms": -66.810018299293
+  }
+}
