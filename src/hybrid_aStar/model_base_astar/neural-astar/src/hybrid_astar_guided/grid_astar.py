@@ -19,6 +19,17 @@ from neural_astar.utils.guidance_targets import build_clearance_penalty_map
 
 
 XY = Tuple[int, int]
+State8 = Tuple[int, int, int]
+DIR_TO_IDX = {
+    (-1, 0): 0,
+    (1, 0): 1,
+    (0, -1): 2,
+    (0, 1): 3,
+    (-1, -1): 4,
+    (1, -1): 5,
+    (-1, 1): 6,
+    (1, 1): 7,
+}
 
 
 def _heuristic(
@@ -73,6 +84,23 @@ def _clearance_priority_bias(
     raise ValueError(f"Unknown clearance_integration_mode: {clearance_integration_mode}")
 
 
+def _local_turn_cost(
+    came_from: Dict[XY, Optional[XY]],
+    current: XY,
+    dx: int,
+    dy: int,
+    turn_weight: float,
+) -> float:
+    previous = came_from.get(current)
+    if previous is None:
+        return 0.0
+    prev_dx = int(current[0]) - int(previous[0])
+    prev_dy = int(current[1]) - int(previous[1])
+    if (prev_dx, prev_dy) == (int(dx), int(dy)):
+        return 0.0
+    return float(turn_weight)
+
+
 @dataclass
 class Astar8ConnStats:
     path: Optional[List[XY]]
@@ -108,6 +136,20 @@ def reconstruct_path(came_from: Dict[XY, Optional[XY]], current: XY) -> List[XY]
     return path
 
 
+def reconstruct_path_from_state(
+    came_from: Dict[State8, Optional[State8]],
+    current: State8,
+) -> List[XY]:
+    path = [(int(current[0]), int(current[1]))]
+    while came_from[current] is not None:
+        current = came_from[current]  # type: ignore[assignment]
+        xy = (int(current[0]), int(current[1]))
+        if xy != path[-1]:
+            path.append(xy)
+    path.reverse()
+    return path
+
+
 def _astar_8conn_impl(
     occ_map: np.ndarray,
     start_xy: XY,
@@ -127,6 +169,8 @@ def _astar_8conn_impl(
     clearance_safe_distance: float = 0.0,
     clearance_power: float = 2.0,
     clearance_integration_mode: str = "g_cost",
+    turn_weight: float = 0.0,
+    turn_integration_mode: str = "state_g_cost",
 ) -> Astar8ConnStats:
     """Run 8-connected A* on occupancy map.
 
@@ -161,6 +205,10 @@ def _astar_8conn_impl(
             penalty to accumulated path cost, ``heuristic_bias`` adds a weak
             obstacle-avoidance bias to node priority, and ``priority_tie_break``
             uses the clearance penalty only as a secondary heap key.
+        turn_weight: extra g-cost charged whenever the incoming movement direction
+            changes. Values greater than zero make the state heading-dependent.
+        turn_integration_mode: ``state_g_cost`` is exact but expands heading states;
+            ``local_g_cost`` is an efficient local approximation for display.
     """
     if diagonal_cost <= 0.0:
         raise ValueError(f"diagonal_cost must be positive, got {diagonal_cost}")
@@ -170,12 +218,16 @@ def _astar_8conn_impl(
         raise ValueError(f"residual_weight must be non-negative, got {residual_weight}")
     if clearance_weight < 0.0:
         raise ValueError(f"clearance_weight must be non-negative, got {clearance_weight}")
+    if turn_weight < 0.0:
+        raise ValueError(f"turn_weight must be non-negative, got {turn_weight}")
     if clearance_safe_distance < 0.0:
         raise ValueError(
             f"clearance_safe_distance must be non-negative, got {clearance_safe_distance}"
         )
     if clearance_integration_mode not in {"g_cost", "heuristic_bias", "priority_tie_break"}:
         raise ValueError(f"Unknown clearance_integration_mode: {clearance_integration_mode}")
+    if turn_integration_mode not in {"state_g_cost", "local_g_cost", "priority_bias"}:
+        raise ValueError(f"Unknown turn_integration_mode: {turn_integration_mode}")
     if guidance_bonus_threshold <= 0.0 or guidance_bonus_threshold > 1.0:
         raise ValueError(
             "guidance_bonus_threshold must be in (0, 1], got "
@@ -245,6 +297,103 @@ def _astar_8conn_impl(
         mode=heuristic_mode,
     ) + float(residual_weight) * float(effective_residual[sy, sx])
 
+    if float(turn_weight) > 0.0 and turn_integration_mode == "state_g_cost":
+        start_state: State8 = (sx, sy, -1)
+        goal_xy = (gx, gy)
+        open_heap_state: List[Tuple[float, float, int, State8]] = []
+        push_id = 0
+        start_clearance_bias = (
+            float(clearance_weight) * float(clearance_penalty[sy, sx])
+            if clearance_integration_mode == "priority_tie_break"
+            else 0.0
+        )
+        heapq.heappush(open_heap_state, (start_h, start_clearance_bias, push_id, start_state))
+
+        came_from_state: Dict[State8, Optional[State8]] = {start_state: None}
+        g_score_state: Dict[State8, float] = {start_state: 0.0}
+        closed_state: set[State8] = set()
+        expanded_xy: List[XY] = []
+        expanded_nodes = 0
+
+        while open_heap_state:
+            _, _, _, current_state = heapq.heappop(open_heap_state)
+            if current_state in closed_state:
+                continue
+            closed_state.add(current_state)
+            expanded_nodes += 1
+            cx, cy, prev_dir_idx = current_state
+            expanded_xy.append((cx, cy))
+            if (cx, cy) == goal_xy:
+                return Astar8ConnStats(
+                    path=reconstruct_path_from_state(came_from_state, current_state),
+                    expanded_nodes=expanded_nodes,
+                    success=True,
+                    expanded_xy=expanded_xy,
+                )
+
+            for nx, ny, dx, dy in _neighbors_8(cx, cy, w, h):
+                dir_idx = DIR_TO_IDX[(dx, dy)]
+                if occ[ny, nx] > 0.5:
+                    continue
+                is_diagonal = (dx != 0) and (dy != 0)
+                if is_diagonal:
+                    side_block_x = occ[cy, nx] > 0.5
+                    side_block_y = occ[ny, cx] > 0.5
+                    if side_block_x and side_block_y:
+                        continue
+                    if (not allow_corner_cut) and (side_block_x or side_block_y):
+                        continue
+                move_cost = float(diagonal_cost) if is_diagonal else 1.0
+                turn_cost = (
+                    float(turn_weight)
+                    if prev_dir_idx >= 0 and int(prev_dir_idx) != int(dir_idx)
+                    else 0.0
+                )
+                guidance_val = float(guidance[ny, nx])
+
+                tentative_g = g_score_state[current_state] + move_cost + turn_cost
+                if guidance_integration_mode == "g_cost":
+                    tentative_g += float(lambda_guidance) * guidance_val
+                if float(clearance_weight) > 0.0 and clearance_integration_mode == "g_cost":
+                    tentative_g += float(clearance_weight) * float(clearance_penalty[ny, nx])
+                neighbor_state: State8 = (nx, ny, dir_idx)
+                if neighbor_state not in g_score_state or tentative_g < g_score_state[neighbor_state]:
+                    g_score_state[neighbor_state] = tentative_g
+                    came_from_state[neighbor_state] = current_state
+                    f = tentative_g + float(heuristic_weight) * _heuristic(
+                        nx,
+                        ny,
+                        gx,
+                        gy,
+                        diagonal_cost=diagonal_cost,
+                        mode=heuristic_mode,
+                    )
+                    f += float(residual_weight) * float(effective_residual[ny, nx])
+                    if guidance_integration_mode != "g_cost":
+                        f += float(lambda_guidance) * _guidance_priority_bias(
+                            guidance_val=guidance_val,
+                            guidance_integration_mode=guidance_integration_mode,
+                            guidance_bonus_threshold=guidance_bonus_threshold,
+                        )
+                    clearance_bias = 0.0
+                    if float(clearance_weight) > 0.0 and clearance_integration_mode != "g_cost":
+                        clearance_bias = float(clearance_weight) * _clearance_priority_bias(
+                            clearance_val=float(clearance_penalty[ny, nx]),
+                            clearance_integration_mode=clearance_integration_mode,
+                        )
+                        if clearance_integration_mode == "heuristic_bias":
+                            f += clearance_bias
+                            clearance_bias = 0.0
+                    push_id += 1
+                    heapq.heappush(open_heap_state, (f, clearance_bias, push_id, neighbor_state))
+
+        return Astar8ConnStats(
+            path=None,
+            expanded_nodes=expanded_nodes,
+            success=False,
+            expanded_xy=expanded_xy,
+        )
+
     open_heap: List[Tuple[float, float, int, XY]] = []
     push_id = 0
     start_clearance_bias = (
@@ -292,6 +441,8 @@ def _astar_8conn_impl(
             guidance_val = float(guidance[ny, nx])
 
             tentative_g = g_score[current] + move_cost
+            if float(turn_weight) > 0.0 and turn_integration_mode == "local_g_cost":
+                tentative_g += _local_turn_cost(came_from, current, dx, dy, float(turn_weight))
             if guidance_integration_mode == "g_cost":
                 tentative_g += float(lambda_guidance) * guidance_val
             if float(clearance_weight) > 0.0 and clearance_integration_mode == "g_cost":
@@ -315,6 +466,8 @@ def _astar_8conn_impl(
                         guidance_integration_mode=guidance_integration_mode,
                         guidance_bonus_threshold=guidance_bonus_threshold,
                     )
+                if float(turn_weight) > 0.0 and turn_integration_mode == "priority_bias":
+                    f += _local_turn_cost(came_from, current, dx, dy, float(turn_weight))
                 clearance_bias = 0.0
                 if float(clearance_weight) > 0.0 and clearance_integration_mode != "g_cost":
                     clearance_bias = float(clearance_weight) * _clearance_priority_bias(
@@ -354,6 +507,8 @@ def astar_8conn(
     clearance_safe_distance: float = 0.0,
     clearance_power: float = 2.0,
     clearance_integration_mode: str = "g_cost",
+    turn_weight: float = 0.0,
+    turn_integration_mode: str = "state_g_cost",
 ) -> Optional[List[XY]]:
     return _astar_8conn_impl(
         occ_map=occ_map,
@@ -374,6 +529,8 @@ def astar_8conn(
         clearance_safe_distance=clearance_safe_distance,
         clearance_power=clearance_power,
         clearance_integration_mode=clearance_integration_mode,
+        turn_weight=turn_weight,
+        turn_integration_mode=turn_integration_mode,
     ).path
 
 
@@ -396,6 +553,8 @@ def astar_8conn_stats(
     clearance_safe_distance: float = 0.0,
     clearance_power: float = 2.0,
     clearance_integration_mode: str = "g_cost",
+    turn_weight: float = 0.0,
+    turn_integration_mode: str = "state_g_cost",
 ) -> Astar8ConnStats:
     return _astar_8conn_impl(
         occ_map=occ_map,
@@ -416,6 +575,8 @@ def astar_8conn_stats(
         clearance_safe_distance=clearance_safe_distance,
         clearance_power=clearance_power,
         clearance_integration_mode=clearance_integration_mode,
+        turn_weight=turn_weight,
+        turn_integration_mode=turn_integration_mode,
     )
 
 

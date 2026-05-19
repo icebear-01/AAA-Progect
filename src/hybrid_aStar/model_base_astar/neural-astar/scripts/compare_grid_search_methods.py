@@ -83,6 +83,24 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--residual-confidence-kernel", type=int, default=5)
     p.add_argument("--residual-confidence-strength", type=float, default=0.75)
     p.add_argument("--residual-confidence-min", type=float, default=0.25)
+    p.add_argument("--classic-clearance-weight", type=float, default=0.0)
+    p.add_argument("--classic-clearance-safe-distance", type=float, default=0.0)
+    p.add_argument("--classic-clearance-power", type=float, default=2.0)
+    p.add_argument(
+        "--classic-clearance-integration-mode",
+        type=str,
+        default="g_cost",
+        choices=["g_cost", "heuristic_bias", "priority_tie_break"],
+    )
+    p.add_argument("--model-search-clearance-weight", type=float, default=0.0)
+    p.add_argument("--model-search-clearance-safe-distance", type=float, default=0.0)
+    p.add_argument("--model-search-clearance-power", type=float, default=2.0)
+    p.add_argument(
+        "--model-search-clearance-integration-mode",
+        type=str,
+        default="g_cost",
+        choices=["g_cost", "heuristic_bias", "priority_tie_break"],
+    )
     p.add_argument("--safety-gate-threshold", type=float, default=0.0)
     p.add_argument("--safety-gate-kernel", type=int, default=1)
     p.add_argument("--safety-gate-low-scale", type=float, default=0.0)
@@ -242,6 +260,10 @@ def _evaluate_classic(
     start_xy: XY,
     goal_xy: XY,
     *,
+    clearance_weight: float,
+    clearance_safe_distance: float,
+    clearance_power: float,
+    clearance_integration_mode: str,
     diagonal_cost: float,
     allow_corner_cut: bool,
 ) -> Tuple[bool, int, float, float]:
@@ -255,6 +277,10 @@ def _evaluate_classic(
             allow_corner_cut=allow_corner_cut,
             heuristic_mode="euclidean",
             heuristic_weight=1.0,
+            clearance_weight=float(clearance_weight),
+            clearance_safe_distance=float(clearance_safe_distance),
+            clearance_power=float(clearance_power),
+            clearance_integration_mode=str(clearance_integration_mode),
         )
     elif label == "improved_astar":
         result = astar_8conn_stats(
@@ -265,6 +291,10 @@ def _evaluate_classic(
             allow_corner_cut=allow_corner_cut,
             heuristic_mode="octile",
             heuristic_weight=1.0,
+            clearance_weight=float(clearance_weight),
+            clearance_safe_distance=float(clearance_safe_distance),
+            clearance_power=float(clearance_power),
+            clearance_integration_mode=str(clearance_integration_mode),
         )
     elif label == "dijkstra":
         result = astar_8conn_stats(
@@ -275,6 +305,10 @@ def _evaluate_classic(
             allow_corner_cut=allow_corner_cut,
             heuristic_mode="octile",
             heuristic_weight=0.0,
+            clearance_weight=float(clearance_weight),
+            clearance_safe_distance=float(clearance_safe_distance),
+            clearance_power=float(clearance_power),
+            clearance_integration_mode=str(clearance_integration_mode),
         )
     elif label == "greedy_best_first":
         result = greedy_best_first_8conn_stats(
@@ -368,6 +402,10 @@ def _evaluate_model(
     allow_corner_cut: bool,
     heuristic_mode: str,
     heuristic_weight: float,
+    clearance_weight: float,
+    clearance_safe_distance: float,
+    clearance_power: float,
+    clearance_integration_mode: str,
 ) -> Tuple[bool, int, float, float]:
     occ = sample["occ_map"].numpy()[0].astype(np.float32)
     start_xy = _onehot_xy(sample["start_map"])
@@ -401,6 +439,10 @@ def _evaluate_model(
         heuristic_residual_map=pred_residual,
         residual_confidence_map=residual_confidence_map,
         residual_weight=float(residual_weight),
+        clearance_weight=float(clearance_weight),
+        clearance_safe_distance=float(clearance_safe_distance),
+        clearance_power=float(clearance_power),
+        clearance_integration_mode=str(clearance_integration_mode),
         diagonal_cost=diagonal_cost,
         allow_corner_cut=allow_corner_cut,
         heuristic_mode=heuristic_mode,
@@ -477,6 +519,10 @@ def main() -> None:
                     occ,
                     start_xy,
                     goal_xy,
+                    clearance_weight=args.classic_clearance_weight,
+                    clearance_safe_distance=args.classic_clearance_safe_distance,
+                    clearance_power=args.classic_clearance_power,
+                    clearance_integration_mode=args.classic_clearance_integration_mode,
                     diagonal_cost=args.diagonal_cost,
                     allow_corner_cut=args.allow_corner_cut,
                 )
@@ -498,6 +544,10 @@ def main() -> None:
                     allow_corner_cut=args.allow_corner_cut,
                     heuristic_mode=args.heuristic_mode,
                     heuristic_weight=args.heuristic_weight,
+                    clearance_weight=args.model_search_clearance_weight,
+                    clearance_safe_distance=args.model_search_clearance_safe_distance,
+                    clearance_power=args.model_search_clearance_power,
+                    clearance_integration_mode=args.model_search_clearance_integration_mode,
                 )
             stats[spec.label].update(
                 success=ok,

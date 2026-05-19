@@ -16,6 +16,10 @@ __pycache__/
 # Experiment / benchmark outputs
 offline_results/
 benchmark_results_paper_res/
+src/emplanner/benchmark_results/
+src/emplanner/paper_4_test_res/
+src/emplanner/rl_dp/main/onnx/
+src/hybrid_aStar/model_base_astar/neural-astar/map/paper_pictures2*/
 
 # Local temporary workdirs
 tmp_saved*/

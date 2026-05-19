@@ -243,6 +243,10 @@ EMPlanner::EMPlanner(ros::NodeHandle &nh,planning_msgs::car_scene car_scene) : c
     pnh.param("st_s_min_step", ST_s_min_step, ST_s_min_step);
     pnh.param("speed_plan_distance", speed_plan_distance, speed_plan_distance);
     pnh.param("st_lateral_limit", st_lateral_limit, st_lateral_limit);
+    pnh.param("safe_distance", safe_distance, safe_distance);
+    pnh.param("safe_distance_wall", safe_distance_wall, safe_distance_wall);
+    pnh.param("relax_qp_start_dl", relax_qp_start_dl, relax_qp_start_dl);
+    pnh.param("qp_start_dl_slack", qp_start_dl_slack, qp_start_dl_slack);
     pnh.param("dynamic_vel_threshold", dynamic_vel_threshold, dynamic_vel_threshold);
     pnh.param("speed_reference", speed_reference, speed_reference);
     pnh.param("speed_dp_ref_vel_weight", w_SpeedDpPlan_ref_vel, w_SpeedDpPlan_ref_vel);
@@ -297,6 +301,18 @@ EMPlanner::EMPlanner(ros::NodeHandle &nh,planning_msgs::car_scene car_scene) : c
     if (st_lateral_limit <= 0.0f) {
         ROS_WARN_STREAM("st_lateral_limit <= 0, reset to 1.0");
         st_lateral_limit = 1.0f;
+    }
+    if (safe_distance < 0.0f) {
+        ROS_WARN_STREAM("safe_distance < 0, reset to 0.2");
+        safe_distance = 0.2f;
+    }
+    if (safe_distance_wall < 0.0f) {
+        ROS_WARN_STREAM("safe_distance_wall < 0, reset to 0.15");
+        safe_distance_wall = 0.15f;
+    }
+    if (qp_start_dl_slack < 0.0f) {
+        ROS_WARN_STREAM("qp_start_dl_slack < 0, reset to 0.0");
+        qp_start_dl_slack = 0.0f;
     }
     if (dynamic_vel_threshold < 0.0f) {
         ROS_WARN_STREAM("dynamic_vel_threshold < 0, reset to 0.0");
@@ -4214,8 +4230,16 @@ Frenet_path_points EMPlanner::cacl_qp_path(float plan_start_s, float plan_start_
     }
     lb(5 * n - 2) = plan_start_l;
     ub(5 * n - 2) = plan_start_l;
-    lb(5 * n - 1) = plan_start_dl;
-    ub(5 * n - 1) = plan_start_dl;
+    if (relax_qp_start_dl)
+    {
+        lb(5 * n - 1) = plan_start_dl - qp_start_dl_slack;
+        ub(5 * n - 1) = plan_start_dl + qp_start_dl_slack;
+    }
+    else
+    {
+        lb(5 * n - 1) = plan_start_dl;
+        ub(5 * n - 1) = plan_start_dl;
+    }
     // lb(5 * n) = plan_start_ddl;
     // ub(5 * n) = plan_start_ddl;
 

@@ -1801,6 +1801,7 @@ VectorVec4d HybridAStar::Smooth(VectorVec4d &path)
             }
         }
     }
+    const std::vector<int> seam_indices = FindGeometrySplitIndices(path);
     auto segment_collision_free = [&](const Vec4d &a, const Vec4d &b) {
         const double dx = b.x() - a.x();
         const double dy = b.y() - a.y();

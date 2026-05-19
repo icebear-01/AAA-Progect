@@ -46,6 +46,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--residual-confidence-kernel", type=int, default=5)
     parser.add_argument("--residual-confidence-strength", type=float, default=0.75)
     parser.add_argument("--residual-confidence-min", type=float, default=0.25)
+    parser.add_argument("--learned-search-clearance-weight", type=float, default=0.0)
+    parser.add_argument("--learned-search-clearance-safe-distance", type=float, default=0.0)
+    parser.add_argument("--learned-search-clearance-power", type=float, default=2.0)
+    parser.add_argument(
+        "--learned-search-clearance-integration-mode",
+        type=str,
+        default="g_cost",
+        choices=["g_cost", "heuristic_bias", "priority_tie_break"],
+    )
     parser.add_argument("--diagonal-cost", type=float, default=float(np.sqrt(2.0)))
     parser.add_argument("--allow-corner-cut", dest="allow_corner_cut", action="store_true")
     parser.add_argument("--no-allow-corner-cut", dest="allow_corner_cut", action="store_false")
@@ -54,6 +63,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
     )
+    parser.add_argument("--hide-expert-overlay", action="store_true")
     parser.add_argument("--dpi", type=int, default=320)
     parser.set_defaults(allow_corner_cut=True)
     return parser.parse_args()
@@ -141,6 +151,10 @@ def main() -> None:
             heuristic_residual_map=pred_residual,
             residual_confidence_map=resolved_conf,
             residual_weight=float(args.residual_weight),
+            clearance_weight=float(args.learned_search_clearance_weight),
+            clearance_safe_distance=float(args.learned_search_clearance_safe_distance),
+            clearance_power=float(args.learned_search_clearance_power),
+            clearance_integration_mode=str(args.learned_search_clearance_integration_mode),
             diagonal_cost=args.diagonal_cost,
             allow_corner_cut=args.allow_corner_cut,
         )
@@ -192,6 +206,7 @@ def main() -> None:
             learned_planner,
             _panel_title("本文方法", learned_planner),
             font_prop,
+            show_expert_overlay=not bool(args.hide_expert_overlay),
         )
 
         _masked_overlay(

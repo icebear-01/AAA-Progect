@@ -19,7 +19,15 @@ class PPOConfig:
     hidden_dim: int = 128
     device: str = "cpu"
     num_envs: int = 4
+    vector_env_mode: str = "sync"
+    vector_env_start_method: str = "fork"
     log_dir: str = "runs/ppo"
     checkpoint_path: str = "checkpoints/ppo_policy.pt"
     checkpoint_interval: int | None = None
+    eval_dataset_path: str | None = None
+    eval_interval: int | None = None
+    eval_count: int = 500
+    eval_num_envs: int = 1
     normalize_value_targets: bool = True
+    include_action_mask_in_state: bool = True
+    apply_action_mask: bool = True

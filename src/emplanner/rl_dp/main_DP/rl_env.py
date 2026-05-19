@@ -22,6 +22,8 @@ from sl_obstacles import Obstacle, generate_random_obstacles
 
 
 _SCENARIO_DATASET_CACHE: Dict[str, Dict[str, object]] = {}
+_SCENARIO_RUNTIME_CACHE: Dict[Tuple[object, ...], List[Dict[str, object]]] = {}
+_SCENARIO_TRANSITION_CACHE: Dict[Tuple[object, ...], Dict[str, np.ndarray]] = {}
 
 
 @dataclass
@@ -145,6 +147,10 @@ class SLPathEnv:
         if interpolation_points < 0:
             raise ValueError("interpolation_points must be non-negative")
         self.interpolation_points = interpolation_points
+        self._interpolation_t_values = tuple(
+            (idx + 1) / (self.interpolation_points + 1)
+            for idx in range(self.interpolation_points)
+        )
         vehicle_length = float(vehicle_length)
         vehicle_width = float(vehicle_width)
         if vehicle_length < 0.0 or vehicle_width < 0.0:
@@ -153,6 +159,7 @@ class SLPathEnv:
             raise ValueError("vehicle_length/vehicle_width must both be zero or positive")
         self.vehicle_length = vehicle_length
         self.vehicle_width = vehicle_width
+        self._use_vehicle_footprint = self.vehicle_length > 0.0 and self.vehicle_width > 0.0
         if not 0.0 <= start_clear_fraction <= 1.0:
             raise ValueError("start_clear_fraction must be in [0, 1]")
         self.start_clear_fraction = float(start_clear_fraction)
@@ -169,6 +176,10 @@ class SLPathEnv:
         self._scenario_dataset = self._load_scenario_dataset(self.scenario_dataset_path)
         self._rng = np.random.default_rng(seed)
 
+        self._s_grid, self._l_grid = build_grid(grid_spec)
+        self._s_coords = self._s_grid[:, 0]
+        self._l_coords = self._l_grid[0, :]
+
         self._s_grid: np.ndarray
         self._l_grid: np.ndarray
         self._occupancy: np.ndarray
@@ -178,6 +189,24 @@ class SLPathEnv:
         self._start_l: float
         self._last_action_mask: Optional[np.ndarray] = None
         self._last_scenario_dp_result: Optional[DPCandidateResult] = None
+        self._occupancy_flat = np.zeros(grid_spec.s_samples * grid_spec.l_samples, dtype=np.float32)
+        self._cached_obstacle_corners = np.zeros((0, 4, 2), dtype=np.float32)
+        self._cached_obstacle_centers = np.zeros((0, 2), dtype=np.float32)
+        self._cached_obstacle_corners_norm = np.zeros((0, 4, 2), dtype=np.float32)
+        self._transition_reward_table = self._build_transition_reward_table()
+        self._transition_move_valid_table = self._build_transition_move_valid_table()
+        self._active_transition_cache: Optional[Dict[str, np.ndarray]] = None
+        self._active_scenario_index: Optional[int] = None
+        self._precomputed_scenarios = self._prepare_precomputed_scenarios()
+        self._precomputed_scenario_index_map = (
+            {
+                int(record["scenario_index"]): record
+                for record in self._precomputed_scenarios
+            }
+            if self._precomputed_scenarios
+            else {}
+        )
+        self._warmup_transition_caches()
 
         self.reset()
 
@@ -267,22 +296,266 @@ class SLPathEnv:
                 f"{dataset_file}"
             )
 
+    def _scenario_runtime_cache_key(self) -> Optional[Tuple[object, ...]]:
+        if self.scenario_dataset_path is None:
+            return None
+        return (
+            self.scenario_dataset_path,
+            tuple(map(float, self.grid_spec.s_range)),
+            tuple(map(float, self.grid_spec.l_range)),
+            int(self.grid_spec.s_samples),
+            int(self.grid_spec.l_samples),
+            float(self.coarse_collision_inflation),
+            float(self.fine_collision_inflation),
+            float(self.vehicle_length),
+            float(self.vehicle_width),
+        )
+
+    def _scenario_transition_cache_key(self, scenario_index: int) -> Optional[Tuple[object, ...]]:
+        base_key = self._scenario_runtime_cache_key()
+        if base_key is None:
+            return None
+        return (
+            *base_key,
+            int(self.interpolation_points),
+            -1 if self.lateral_move_limit is None else int(self.lateral_move_limit),
+            int(scenario_index),
+        )
+
+    def _build_transition_move_valid_table(self) -> np.ndarray:
+        l_count = self.grid_spec.l_samples
+        if self.lateral_move_limit is None:
+            return np.ones((l_count, l_count), dtype=bool)
+        idxs = np.arange(l_count, dtype=np.int16)
+        delta = np.abs(idxs[:, None] - idxs[None, :])
+        return delta <= int(self.lateral_move_limit)
+
+    def _build_transition_reward_table(self) -> np.ndarray:
+        s_count = self.grid_spec.s_samples
+        l_count = self.grid_spec.l_samples
+        rewards = np.zeros((s_count, l_count, l_count), dtype=np.float32)
+        prev_idx_grid = np.arange(l_count, dtype=np.float32)[:, None]
+        curr_idx_grid = np.arange(l_count, dtype=np.float32)[None, :]
+        idx_delta = np.abs(curr_idx_grid - prev_idx_grid)
+        curr_l_grid = self._l_coords.astype(np.float32)[None, :]
+        prev_l_grid = self._l_coords.astype(np.float32)[:, None]
+        delta_l = curr_l_grid - prev_l_grid
+
+        base_smoothness = np.abs(delta_l) * float(self.base_smoothness_penalty)
+        reference_cost = (
+            np.abs(curr_l_grid - float(self.lateral_reference)) * float(self.reference_penalty)
+        )
+
+        move_limit_cost = np.zeros((l_count, l_count), dtype=np.float32)
+        if self.lateral_move_limit is not None:
+            excess = np.maximum(idx_delta - float(self.lateral_move_limit), 0.0)
+            move_limit_cost = (
+                excess
+                * float(self.smoothness_penalty)
+                * float(self.move_limit_penalty_multiplier)
+            ).astype(np.float32, copy=False)
+
+        for s_idx in range(1, s_count):
+            prev_s = float(self._s_coords[s_idx - 1])
+            curr_s = float(self._s_coords[s_idx])
+            delta_s = max(abs(curr_s - prev_s), 1e-6)
+            slope = np.abs(delta_l) / delta_s
+            slope_excess = np.maximum(slope - float(self.max_slope), 0.0)
+            slope_cost = slope_excess * float(self.max_slope_penalty)
+            total_cost = base_smoothness + reference_cost + move_limit_cost + slope_cost
+            rewards[s_idx] = -total_cost.astype(np.float32, copy=False)
+        return rewards
+
+    def _build_transition_cache(
+        self,
+        scenario_index: int,
+        obstacles: Sequence[Obstacle],
+    ) -> Dict[str, np.ndarray]:
+        cache_key = self._scenario_transition_cache_key(scenario_index)
+        if cache_key is not None:
+            cached = _SCENARIO_TRANSITION_CACHE.get(cache_key)
+            if cached is not None:
+                return cached
+
+        s_count = self.grid_spec.s_samples
+        l_count = self.grid_spec.l_samples
+        collision_table = np.zeros((s_count, l_count, l_count), dtype=bool)
+        previous_obstacles = getattr(self, "_obstacles", ())
+        self._obstacles = obstacles
+        try:
+            for s_idx in range(1, s_count):
+                prev_s = float(self._s_coords[s_idx - 1])
+                curr_s = float(self._s_coords[s_idx])
+                for prev_l_idx in range(l_count):
+                    prev_l = float(self._l_coords[prev_l_idx])
+                    for curr_l_idx in range(l_count):
+                        curr_l = float(self._l_coords[curr_l_idx])
+                        collision_table[s_idx, prev_l_idx, curr_l_idx] = (
+                            self._interpolated_hits_any_obstacle(prev_s, prev_l, curr_s, curr_l)
+                        )
+        finally:
+            self._obstacles = previous_obstacles
+
+        action_mask_table = self._transition_move_valid_table[None, :, :] & ~collision_table
+        action_mask_table[0] = False
+        transition_cache = {
+            "collision_table": collision_table,
+            "action_mask_table": action_mask_table,
+        }
+        if cache_key is not None:
+            _SCENARIO_TRANSITION_CACHE[cache_key] = transition_cache
+        return transition_cache
+
+    def _transition_penalty_components(
+        self,
+        s_idx: int,
+        prev_l_idx: int,
+        curr_l_idx: int,
+    ) -> Dict[str, float]:
+        prev_l = float(self._l_coords[prev_l_idx])
+        curr_l = float(self._l_coords[curr_l_idx])
+        prev_s = float(self._s_coords[max(s_idx - 1, 0)])
+        curr_s = float(self._s_coords[min(s_idx, self.grid_spec.s_samples - 1)])
+
+        smoothness_cost = abs(curr_l - prev_l) * float(self.base_smoothness_penalty)
+        reference_cost = abs(curr_l - float(self.lateral_reference)) * float(self.reference_penalty)
+
+        move_limit_cost = 0.0
+        if self.lateral_move_limit is not None:
+            delta_idx = abs(int(curr_l_idx) - int(prev_l_idx))
+            excess = max(0, delta_idx - int(self.lateral_move_limit))
+            move_limit_cost = (
+                float(excess)
+                * float(self.smoothness_penalty)
+                * float(self.move_limit_penalty_multiplier)
+            )
+
+        delta_s = max(abs(curr_s - prev_s), 1e-6)
+        slope = abs((curr_l - prev_l) / delta_s)
+        slope_excess = max(0.0, slope - float(self.max_slope))
+        slope_cost = slope_excess * float(self.max_slope_penalty)
+
+        return {
+            "move_limit_cost": move_limit_cost,
+            "smoothness_cost": smoothness_cost,
+            "reference_cost": reference_cost,
+            "slope_cost": -slope_cost,
+        }
+
+    def _normalize_obstacle_corners(self, corners: np.ndarray) -> np.ndarray:
+        if corners.size == 0:
+            return np.zeros((0, 4, 2), dtype=np.float32)
+        s_min, s_max = self.grid_spec.s_range
+        l_min, l_max = self.grid_spec.l_range
+        s_span = max(s_max - s_min, 1e-6)
+        l_span = max(l_max - l_min, 1e-6)
+        corners_norm = np.asarray(corners, dtype=np.float32).copy()
+        corners_norm[..., 0] = np.clip((corners_norm[..., 0] - s_min) / s_span, 0.0, 1.0)
+        corners_norm[..., 1] = np.clip((corners_norm[..., 1] - l_min) / l_span, 0.0, 1.0)
+        return corners_norm
+
+    def _build_runtime_feature_cache(
+        self,
+        obstacles: Sequence[Obstacle],
+        occupancy: np.ndarray,
+    ) -> Dict[str, np.ndarray]:
+        if obstacles:
+            obstacle_corners = np.stack(
+                [np.asarray(obstacle.corners(), dtype=np.float32) for obstacle in obstacles],
+                axis=0,
+            )
+            obstacle_centers = obstacle_corners.mean(axis=1, dtype=np.float32)
+        else:
+            obstacle_corners = np.zeros((0, 4, 2), dtype=np.float32)
+            obstacle_centers = np.zeros((0, 2), dtype=np.float32)
+        return {
+            "occupancy_flat": np.asarray(occupancy, dtype=np.float32).reshape(-1).copy(),
+            "obstacle_corners": obstacle_corners,
+            "obstacle_centers": obstacle_centers,
+            "obstacle_corners_norm": self._normalize_obstacle_corners(obstacle_corners),
+        }
+
+    def _apply_runtime_feature_cache(self, cache: Dict[str, np.ndarray], occupancy: np.ndarray) -> None:
+        self._occupancy = occupancy
+        self._occupancy_flat = cache["occupancy_flat"]
+        self._cached_obstacle_corners = cache["obstacle_corners"]
+        self._cached_obstacle_centers = cache["obstacle_centers"]
+        self._cached_obstacle_corners_norm = cache["obstacle_corners_norm"]
+
+    def _prepare_precomputed_scenarios(self) -> Optional[List[Dict[str, object]]]:
+        if self._scenario_dataset is None:
+            return None
+        cache_key = self._scenario_runtime_cache_key()
+        if cache_key is not None and cache_key in _SCENARIO_RUNTIME_CACHE:
+            return _SCENARIO_RUNTIME_CACHE[cache_key]
+
+        scenarios = self._scenario_dataset.get("scenarios", [])
+        precomputed: List[Dict[str, object]] = []
+        for record in scenarios:
+            if not isinstance(record, dict):
+                continue
+            raw_obstacles = record.get("obstacles", [])
+            if not isinstance(raw_obstacles, list):
+                raise ValueError("Scenario record obstacles must be a list.")
+            obstacles = tuple(self._obstacle_from_record(entry) for entry in raw_obstacles)
+            occupancy = self._build_occupancy(obstacles)
+            runtime_cache = self._build_runtime_feature_cache(obstacles, occupancy)
+
+            dp_result: Optional[DPCandidateResult] = None
+            path_indices = record.get("path_indices")
+            if isinstance(path_indices, list) and path_indices:
+                dp_result = DPCandidateResult(
+                    feasible=True,
+                    total_cost=float(record.get("dp_total_cost", 0.0)),
+                    avg_cost=float(record.get("dp_avg_cost", 0.0)),
+                    path_indices=tuple(int(index) for index in path_indices),
+                )
+
+            precomputed.append(
+                {
+                    "obstacles": obstacles,
+                    "occupancy": occupancy,
+                    "runtime_cache": runtime_cache,
+                    "start_l": float(record.get("start_l", 0.0)),
+                    "dp_result": dp_result,
+                    "source": record.get("source", ""),
+                    "scenario_index": int(record.get("scenario_index", len(precomputed))),
+                    "obstacle_count": int(record.get("obstacle_count", len(obstacles))),
+                }
+            )
+
+        if cache_key is not None:
+            _SCENARIO_RUNTIME_CACHE[cache_key] = precomputed
+        return precomputed
+
+    def _warmup_transition_caches(self) -> None:
+        if not self._precomputed_scenarios:
+            return
+        first_index = int(self._precomputed_scenarios[0]["scenario_index"])
+        first_key = self._scenario_transition_cache_key(first_index)
+        if first_key is not None and first_key in _SCENARIO_TRANSITION_CACHE:
+            return
+        for record in self._precomputed_scenarios:
+            self._build_transition_cache(
+                int(record["scenario_index"]),
+                record["obstacles"],
+            )
+
     def reset(self, start_l: float | None = None) -> Dict[str, np.ndarray]:
         """Reset the environment and return the initial observation."""
-        spec = self.grid_spec
-        self._s_grid, self._l_grid = build_grid(spec)
-
+        self._active_transition_cache = None
+        self._active_scenario_index = None
         (
             self._obstacles,
-            self._occupancy,
+            occupancy,
             start_l_value,
             initial_l,
             self._last_scenario_dp_result,
         ) = self._sample_screened_scenario(start_l=start_l)
         self._path_indices = []
-        l_coords = self._l_grid[0, :]
+        l_coords = self._l_coords
         if start_l is not None:
-            start_l_value = float(np.clip(start_l, spec.l_range[0], spec.l_range[1]))
+            start_l_value = float(np.clip(start_l, self.grid_spec.l_range[0], self.grid_spec.l_range[1]))
             initial_l = int(np.argmin(np.abs(l_coords - start_l_value)))
         self._start_l = start_l_value
         self._path_indices.append(int(initial_l))
@@ -314,21 +587,20 @@ class SLPathEnv:
         *,
         start_l: float | None = None,
     ) -> Tuple[List[Obstacle], np.ndarray, float, int, Optional[DPCandidateResult]]:
-        if self._scenario_dataset is None:
+        if self._precomputed_scenarios is None:
             raise RuntimeError("Scenario dataset is not loaded.")
-        scenarios = self._scenario_dataset["scenarios"]
-        if not isinstance(scenarios, list) or not scenarios:
+        scenarios = self._precomputed_scenarios
+        if not scenarios:
             raise RuntimeError("Scenario dataset contains no scenarios.")
 
         record = scenarios[int(self._rng.integers(0, len(scenarios)))]
-        if not isinstance(record, dict):
-            raise ValueError("Scenario record must be a JSON object.")
-        raw_obstacles = record.get("obstacles", [])
-        if not isinstance(raw_obstacles, list):
-            raise ValueError("Scenario record obstacles must be a list.")
-        obstacles = [self._obstacle_from_record(entry) for entry in raw_obstacles]
-        occupancy = self._build_occupancy(obstacles)
-        l_coords = self._l_grid[0, :]
+        obstacles = list(record["obstacles"])
+        occupancy = record["occupancy"]
+        self._apply_runtime_feature_cache(record["runtime_cache"], occupancy)
+        scenario_index = int(record["scenario_index"])
+        self._active_scenario_index = scenario_index
+        self._active_transition_cache = self._build_transition_cache(scenario_index, obstacles)
+        l_coords = self._l_coords
 
         if start_l is None:
             start_l_value = float(record.get("start_l", self._sample_start_l_value(None)))
@@ -336,20 +608,40 @@ class SLPathEnv:
             start_l_value = self._sample_start_l_value(start_l)
         initial_l = int(np.argmin(np.abs(l_coords - start_l_value)))
 
-        dp_result: Optional[DPCandidateResult] = None
-        path_indices = record.get("path_indices")
-        if (
-            start_l is None
-            and isinstance(path_indices, list)
-            and path_indices
-        ):
-            dp_result = DPCandidateResult(
-                feasible=True,
-                total_cost=float(record.get("dp_total_cost", 0.0)),
-                avg_cost=float(record.get("dp_avg_cost", 0.0)),
-                path_indices=tuple(int(index) for index in path_indices),
-            )
+        dp_result = record.get("dp_result") if start_l is None else None
         return obstacles, occupancy, start_l_value, initial_l, dp_result
+
+    def reset_to_scenario_index(self, scenario_index: int, start_l: float | None = None) -> Dict[str, np.ndarray]:
+        """Reset the environment to a specific precomputed scenario by index."""
+        if not self._precomputed_scenarios:
+            raise RuntimeError("Scenario dataset is not loaded.")
+        record = self._precomputed_scenario_index_map.get(int(scenario_index))
+        if record is None:
+            raise KeyError(f"Scenario index {scenario_index} not found in loaded dataset.")
+
+        self._active_transition_cache = None
+        self._active_scenario_index = None
+        self._obstacles = list(record["obstacles"])
+        occupancy = record["occupancy"]
+        self._apply_runtime_feature_cache(record["runtime_cache"], occupancy)
+        self._active_scenario_index = int(record["scenario_index"])
+        self._active_transition_cache = self._build_transition_cache(
+            self._active_scenario_index,
+            self._obstacles,
+        )
+
+        l_coords = self._l_coords
+        if start_l is None:
+            start_l_value = float(record.get("start_l", self._sample_start_l_value(None)))
+        else:
+            start_l_value = self._sample_start_l_value(start_l)
+        initial_l = int(np.argmin(np.abs(l_coords - start_l_value)))
+
+        self._last_scenario_dp_result = record.get("dp_result") if start_l is None else None
+        self._start_l = start_l_value
+        self._path_indices = [int(initial_l)]
+        self._s_index = 1 if self.grid_spec.s_samples > 1 else 0
+        return self._build_observation()
 
     def _generate_candidate_obstacles(self) -> List[Obstacle]:
         obstacles = generate_random_obstacles(
@@ -397,6 +689,7 @@ class SLPathEnv:
         if not self._is_screening_enabled():
             obstacles = self._generate_candidate_obstacles()
             occupancy = self._build_occupancy(obstacles)
+            self._apply_runtime_feature_cache(self._build_runtime_feature_cache(obstacles, occupancy), occupancy)
             self._obstacles = obstacles
             return obstacles, occupancy, start_l_value, initial_l, None
 
@@ -410,6 +703,7 @@ class SLPathEnv:
         for _ in range(max_attempts):
             obstacles = self._generate_candidate_obstacles()
             occupancy = self._build_occupancy(obstacles)
+            self._apply_runtime_feature_cache(self._build_runtime_feature_cache(obstacles, occupancy), occupancy)
             self._obstacles = obstacles
             dp_result = self._evaluate_scenario_with_dp(initial_l)
             last_candidate = (obstacles, occupancy, dp_result)
@@ -437,16 +731,19 @@ class SLPathEnv:
             top_k = min(len(selected_pool), self.scenario_top_k)
             pick_idx = int(self._rng.integers(0, top_k)) if top_k > 1 else 0
             obstacles, occupancy, dp_result = selected_pool[pick_idx]
+            self._apply_runtime_feature_cache(self._build_runtime_feature_cache(obstacles, occupancy), occupancy)
             self._obstacles = obstacles
             return obstacles, occupancy, start_l_value, initial_l, dp_result
 
         if last_candidate is not None:
             obstacles, occupancy, dp_result = last_candidate
+            self._apply_runtime_feature_cache(self._build_runtime_feature_cache(obstacles, occupancy), occupancy)
             self._obstacles = obstacles
             return obstacles, occupancy, start_l_value, initial_l, dp_result
 
         obstacles = self._generate_candidate_obstacles()
         occupancy = self._build_occupancy(obstacles)
+        self._apply_runtime_feature_cache(self._build_runtime_feature_cache(obstacles, occupancy), occupancy)
         self._obstacles = obstacles
         dp_result = self._evaluate_scenario_with_dp(initial_l)
         return obstacles, occupancy, start_l_value, initial_l, dp_result
@@ -586,6 +883,34 @@ class SLPathEnv:
         done = False
         info: Dict[str, object] = {}
 
+        if self._path_indices and self._active_transition_cache is not None:
+            prev_idx = int(self._path_indices[-1])
+            curr_s_idx = min(self._s_index, self.grid_spec.s_samples - 1)
+            collision_table = self._active_transition_cache["collision_table"]
+            if bool(collision_table[curr_s_idx, prev_idx, action]):
+                reward = self.collision_penalty
+                done = True
+                info["reason"] = "collision"
+                if self.non_goal_penalty > 0.0:
+                    reward -= self.non_goal_penalty
+                    info["non_goal_penalty"] = self.non_goal_penalty
+                self._path_indices.append(action)
+                observation = self._build_observation()
+                return StepResult(observation, reward, done, info)
+
+            reward = float(self._transition_reward_table[curr_s_idx, prev_idx, action])
+            info.update(self._transition_penalty_components(curr_s_idx, prev_idx, action))
+            self._path_indices.append(action)
+            self._s_index += 1
+
+            if self._s_index >= self.grid_spec.s_samples:
+                done = True
+                reward += self.terminal_reward
+                info["reason"] = "goal_reached"
+
+            observation = self._build_observation()
+            return StepResult(observation, reward, done, info)
+
         # Enforce lateral move limit for smoother paths.
         if self.path_indices and self.lateral_move_limit is not None:
             prev = self.path_indices[-1]
@@ -663,15 +988,20 @@ class SLPathEnv:
         """Construct the observation dictionary for the current state."""
         action_mask = self._compute_action_mask()
         self._last_action_mask = action_mask.copy()
+        current_l_index = int(self._path_indices[-1]) if self._path_indices else 0
         return {
             "s_index": np.array(self._s_index, dtype=np.int32),
             "path_indices": np.array(self._path_indices, dtype=np.int32),
-            "occupancy": self._occupancy.copy(),
-            "s_coords": self._s_grid[:, 0],
-            "l_coords": self._l_grid[0, :],
+            "current_l_index": np.array(current_l_index, dtype=np.int32),
+            "occupancy": self._occupancy,
+            "occupancy_flat": self._occupancy_flat,
+            "s_coords": self._s_coords,
+            "l_coords": self._l_coords,
             "start_l": np.array(self._start_l, dtype=np.float32),
             "action_mask": action_mask,
-            "obstacle_corners": self._obstacle_corners_array(),
+            "obstacle_corners": self._cached_obstacle_corners,
+            "obstacle_centers": self._cached_obstacle_centers,
+            "obstacle_corners_norm": self._cached_obstacle_corners_norm,
         }
 
     def _build_occupancy(self, obstacles: Sequence[Obstacle]) -> np.ndarray:
@@ -761,10 +1091,7 @@ class SLPathEnv:
 
     def _obstacle_corners_array(self) -> np.ndarray:
         """Return current obstacle corners as an array shaped (N, 4, 2)."""
-        if not self._obstacles:
-            return np.zeros((0, 4, 2), dtype=np.float32)
-        corners = [np.asarray(obstacle.corners(), dtype=np.float32) for obstacle in self._obstacles]
-        return np.stack(corners, axis=0)
+        return self._cached_obstacle_corners
 
     @staticmethod
     def _obb_intersects_obb(
@@ -883,14 +1210,16 @@ class SLPathEnv:
             return False
         delta_s = end_s - start_s
         delta_l = end_l - start_l
-        heading = math.atan2(delta_l, delta_s) if delta_s or delta_l else 0.0
+        heading = (
+            math.atan2(delta_l, delta_s)
+            if self._use_vehicle_footprint and (delta_s or delta_l)
+            else 0.0
+        )
         if self._footprint_hits_any_obstacle(end_s, end_l, heading):
             return True
-        count = self.interpolation_points
-        if count <= 0:
+        if not self._interpolation_t_values:
             return False
-        t_values = [(idx + 1) / (count + 1) for idx in range(count)]
-        for t in t_values:
+        for t in self._interpolation_t_values:
             s_mid = start_s + (end_s - start_s) * t
             l_mid = start_l + (end_l - start_l) * t
             if self._footprint_hits_any_obstacle(s_mid, l_mid, heading):
@@ -917,6 +1246,12 @@ class SLPathEnv:
         # 避免越界：到达终点或超出时直接返回全 False（上层会兜底）。
         if self._s_index >= self.grid_spec.s_samples:
             return np.zeros(l_count, dtype=bool)
+
+        if self._active_transition_cache is not None and self._path_indices:
+            prev_idx = int(self._path_indices[-1])
+            return self._active_transition_cache["action_mask_table"][
+                self._s_index, prev_idx
+            ].copy()
 
         # 屏蔽过大的横向跳变。
         if self.lateral_move_limit is not None and self._path_indices:

@@ -1,0 +1,41 @@
+<launch>
+  <arg name="world_frame" default="world"/>
+  <arg name="launch_rviz" default="true"/>
+  <arg name="seed" default="1"/>
+  <arg name="warmup_cases" default="6"/>
+  <arg name="sample_attempts" default="3"/>
+  <arg name="exit_after_run" default="false"/>
+
+  <node pkg="hybrid_a_star" type="hope_extrem_hybrid_astar_rviz" name="hope_extrem_hybrid_astar" output="screen">
+    <param name="world_frame" value="$(arg world_frame)"/>
+    <param name="level" value="Extrem"/>
+    <param name="case_id" value="1"/>
+    <param name="horizontal_parallel_case" value="true"/>
+    <param name="seed" value="$(arg seed)"/>
+    <param name="warmup_cases" value="$(arg warmup_cases)"/>
+    <param name="sample_attempts" value="$(arg sample_attempts)"/>
+    <param name="exit_after_run" value="$(arg exit_after_run)"/>
+
+    <param name="map_margin" value="1.0"/>
+    <param name="map_grid_resolution" value="0.12"/>
+    <param name="state_grid_resolution" value="0.6"/>
+    <param name="obstacle_inflation" value="0.03"/>
+    <param name="simplified_collision_check" value="false"/>
+    <param name="fix_endpoint_heading" value="true"/>
+    <param name="vehicle_marker_interval" value="6"/>
+
+    <param name="planner/steering_angle" value="42.0"/>
+    <param name="planner/steering_angle_discrete_num" value="12"/>
+    <param name="planner/wheel_base" value="2.8"/>
+    <param name="planner/segment_length" value="0.75"/>
+    <param name="planner/segment_length_discrete_num" value="10"/>
+    <param name="planner/steering_penalty" value="1.5"/>
+    <param name="planner/reversing_penalty" value="2.0"/>
+    <param name="planner/steering_change_penalty" value="4.0"/>
+    <param name="planner/shot_distance" value="8.0"/>
+    <param name="planner/phi_grid_size" value="72"/>
+  </node>
+
+  <node if="$(arg launch_rviz)" pkg="rviz" type="rviz" name="hope_extrem_hybrid_astar_rviz"
+        args="-d $(find hybrid_a_star)/rviz/hope_extrem_hybrid_astar.rviz"/>
+</launch>

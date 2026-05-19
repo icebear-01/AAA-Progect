@@ -63,6 +63,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--search-clearance-weight", type=float, default=0.2)
     p.add_argument("--search-clearance-safe-distance", type=float, default=3.0)
     p.add_argument("--search-clearance-power", type=float, default=2.0)
+    p.add_argument("--search-turn-weight", type=float, default=0.0)
+    p.add_argument(
+        "--search-turn-mode",
+        type=str,
+        default="local_g_cost",
+        choices=["priority_bias", "local_g_cost", "state_g_cost"],
+    )
     p.add_argument("--dpi", type=int, default=260)
     p.add_argument("--also-save-64x64", action="store_true")
     return p.parse_args()
@@ -422,6 +429,8 @@ def main() -> None:
         clearance_safe_distance=float(args.search_clearance_safe_distance),
         clearance_power=float(args.search_clearance_power),
         clearance_integration_mode="g_cost",
+        turn_weight=float(args.search_turn_weight),
+        turn_integration_mode=str(args.search_turn_mode),
     )
     final_ms = (time.perf_counter() - final_t0) * 1000.0
 
@@ -525,6 +534,8 @@ def main() -> None:
                 "expanded_nodes": int(final_stats.expanded_nodes),
                 "search_time_ms": float(final_ms),
                 "path_length_m": float(path_length_8conn(final_stats.path, diagonal_cost=math.sqrt(2.0)) * resolution),
+                "turn_weight": float(args.search_turn_weight),
+                "turn_mode": str(args.search_turn_mode),
             },
             "residual_max": float(np.max(residual_map)),
             "confidence_mean": float(np.mean(confidence_map[occ <= 0.5])),
@@ -564,6 +575,8 @@ def main() -> None:
             clearance_safe_distance=float(args.search_clearance_safe_distance),
             clearance_power=float(args.search_clearance_power),
             clearance_integration_mode="g_cost",
+            turn_weight=float(args.search_turn_weight),
+            turn_integration_mode=str(args.search_turn_mode),
         )
         final_small_ms = (time.perf_counter() - final_small_t0) * 1000.0
 
@@ -655,6 +668,8 @@ def main() -> None:
                 "final_64x64": {
                     "expanded_nodes": int(final_small_stats.expanded_nodes),
                     "search_time_ms": float(final_small_ms),
+                    "turn_weight": float(args.search_turn_weight),
+                    "turn_mode": str(args.search_turn_mode),
                 },
                 "residual_max_64x64": float(np.max(residual_small)),
                 "confidence_mean_64x64": float(np.mean(confidence_small[occ_small <= 0.5])),

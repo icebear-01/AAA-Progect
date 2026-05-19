@@ -90,9 +90,29 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--residual-confidence-kernel", type=int, default=3)
     p.add_argument("--residual-confidence-strength", type=float, default=0.75)
     p.add_argument("--residual-confidence-min", type=float, default=0.1)
+    p.add_argument("--classic-clearance-weight", type=float, default=0.0)
+    p.add_argument("--classic-clearance-safe-distance", type=float, default=0.0)
+    p.add_argument("--classic-clearance-power", type=float, default=2.0)
+    p.add_argument(
+        "--classic-clearance-integration-mode",
+        type=str,
+        default="g_cost",
+        choices=["g_cost", "heuristic_bias", "priority_tie_break"],
+    )
+    p.add_argument("--v3-search-clearance-weight", type=float, default=0.0)
+    p.add_argument("--v3-search-clearance-safe-distance", type=float, default=0.0)
+    p.add_argument("--v3-search-clearance-power", type=float, default=2.0)
+    p.add_argument(
+        "--v3-search-clearance-integration-mode",
+        type=str,
+        default="g_cost",
+        choices=["g_cost", "heuristic_bias", "priority_tie_break"],
+    )
     p.add_argument("--diagonal-cost", type=float, default=float(np.sqrt(2.0)))
     p.add_argument("--allow-corner-cut", dest="allow_corner_cut", action="store_true")
     p.add_argument("--no-allow-corner-cut", dest="allow_corner_cut", action="store_false")
+    p.add_argument("--hide-expert-overlay", action="store_true")
+    p.add_argument("--hide-expert-panel", action="store_true")
     p.add_argument("--dpi", type=int, default=220)
     p.add_argument("--output-dir", type=Path, required=True)
     p.set_defaults(allow_corner_cut=True)
@@ -211,6 +231,10 @@ def _run_astar(
     heuristic_residual_map: np.ndarray | None = None,
     residual_confidence_map: np.ndarray | None = None,
     residual_weight: float = 0.0,
+    clearance_weight: float = 0.0,
+    clearance_safe_distance: float = 0.0,
+    clearance_power: float = 2.0,
+    clearance_integration_mode: str = "g_cost",
     diagonal_cost: float,
     allow_corner_cut: bool,
 ) -> PlannerView:
@@ -224,6 +248,10 @@ def _run_astar(
         heuristic_residual_map=heuristic_residual_map,
         residual_confidence_map=residual_confidence_map,
         residual_weight=float(residual_weight),
+        clearance_weight=float(clearance_weight),
+        clearance_safe_distance=float(clearance_safe_distance),
+        clearance_power=float(clearance_power),
+        clearance_integration_mode=str(clearance_integration_mode),
         diagonal_cost=float(diagonal_cost),
         allow_corner_cut=bool(allow_corner_cut),
     )
@@ -247,17 +275,19 @@ def _base_scene(
     expert_path_xy: List[XY],
     start_xy: XY,
     goal_xy: XY,
+    show_expert_overlay: bool = True,
 ) -> None:
     ax.imshow(1.0 - occ, cmap="gray", vmin=0.0, vmax=1.0, interpolation="nearest")
-    if expert_traj.ndim == 3:
-        expert_2d = expert_traj[0]
-    else:
-        expert_2d = expert_traj
-    ax.imshow(expert_2d, cmap="Blues", alpha=0.12, vmin=0.0, vmax=1.0, interpolation="nearest")
-    if len(expert_path_xy) > 1:
-        xs = [p[0] for p in expert_path_xy]
-        ys = [p[1] for p in expert_path_xy]
-        ax.plot(xs, ys, color=SCENE_COLORS["expert"], linewidth=2.0, alpha=0.95, linestyle="--")
+    if show_expert_overlay:
+        if expert_traj.ndim == 3:
+            expert_2d = expert_traj[0]
+        else:
+            expert_2d = expert_traj
+        ax.imshow(expert_2d, cmap="Blues", alpha=0.12, vmin=0.0, vmax=1.0, interpolation="nearest")
+        if len(expert_path_xy) > 1:
+            xs = [p[0] for p in expert_path_xy]
+            ys = [p[1] for p in expert_path_xy]
+            ax.plot(xs, ys, color=SCENE_COLORS["expert"], linewidth=2.0, alpha=0.95, linestyle="--")
     ax.scatter([start_xy[0]], [start_xy[1]], c=SCENE_COLORS["start"], s=48, marker="o")
     ax.scatter([goal_xy[0]], [goal_xy[1]], c=SCENE_COLORS["goal"], s=56, marker="x")
     ax.set_axis_off()
@@ -272,8 +302,17 @@ def _plot_search_panel(
     goal_xy: XY,
     view: PlannerView,
     color: str,
+    show_expert_overlay: bool,
 ) -> None:
-    _base_scene(ax, occ, expert_traj, expert_path_xy, start_xy, goal_xy)
+    _base_scene(
+        ax,
+        occ,
+        expert_traj,
+        expert_path_xy,
+        start_xy,
+        goal_xy,
+        show_expert_overlay=show_expert_overlay,
+    )
     heat = _expanded_heatmap(view.stats, occ.shape[0], occ.shape[1])
     if float(heat.max()) > 0.0:
         ax.imshow(heat, cmap="magma", alpha=0.58, vmin=0.0, vmax=1.0, interpolation="nearest")
@@ -301,8 +340,17 @@ def _plot_map_panel(
     vmin: float,
     vmax: float,
     v3_path: List[XY] | None,
+    show_expert_overlay: bool,
 ) -> None:
-    _base_scene(ax, occ, expert_traj, expert_path_xy, start_xy, goal_xy)
+    _base_scene(
+        ax,
+        occ,
+        expert_traj,
+        expert_path_xy,
+        start_xy,
+        goal_xy,
+        show_expert_overlay=show_expert_overlay,
+    )
     masked = np.ma.masked_where(occ > 0.5, data)
     im = ax.imshow(masked, cmap=cmap, vmin=vmin, vmax=vmax, alpha=0.90, interpolation="nearest")
     if v3_path is not None and len(v3_path) > 1:
@@ -330,13 +378,47 @@ def _save_case_figure(
     effective_map: np.ndarray,
     out_path: Path,
     dpi: int,
+    show_expert_overlay: bool,
+    show_expert_panel: bool,
 ) -> None:
     fig, axes = plt.subplots(2, 3, figsize=(16.0, 10.2))
 
-    _plot_search_panel(axes[0, 0], occ, expert_traj, expert_path_xy, start_xy, goal_xy, improved_view, SCENE_COLORS["improved"])
-    _plot_search_panel(axes[0, 1], occ, expert_traj, expert_path_xy, start_xy, goal_xy, v3_view, SCENE_COLORS["v3"])
-    _base_scene(axes[0, 2], occ, expert_traj, expert_path_xy, start_xy, goal_xy)
-    axes[0, 2].set_title("Improved Expert Path", fontsize=10, pad=8)
+    _plot_search_panel(
+        axes[0, 0],
+        occ,
+        expert_traj,
+        expert_path_xy,
+        start_xy,
+        goal_xy,
+        improved_view,
+        SCENE_COLORS["improved"],
+        show_expert_overlay=show_expert_overlay,
+    )
+    _plot_search_panel(
+        axes[0, 1],
+        occ,
+        expert_traj,
+        expert_path_xy,
+        start_xy,
+        goal_xy,
+        v3_view,
+        SCENE_COLORS["v3"],
+        show_expert_overlay=show_expert_overlay,
+    )
+    _base_scene(
+        axes[0, 2],
+        occ,
+        expert_traj,
+        expert_path_xy,
+        start_xy,
+        goal_xy,
+        show_expert_overlay=show_expert_panel and show_expert_overlay,
+    )
+    axes[0, 2].set_title(
+        "Improved Expert Path" if show_expert_panel else "Map Layout",
+        fontsize=10,
+        pad=8,
+    )
 
     pos_res = residual_map[residual_map > 0.0]
     pos_eff = effective_map[effective_map > 0.0]
@@ -357,6 +439,7 @@ def _save_case_figure(
         0.0,
         max(res_vmax, 1e-6),
         v3_path,
+        show_expert_overlay=show_expert_overlay,
     )
     _plot_map_panel(
         axes[1, 1],
@@ -371,6 +454,7 @@ def _save_case_figure(
         0.0,
         1.0,
         v3_path,
+        show_expert_overlay=show_expert_overlay,
     )
     _plot_map_panel(
         axes[1, 2],
@@ -385,6 +469,7 @@ def _save_case_figure(
         0.0,
         max(eff_vmax, 1e-6),
         v3_path,
+        show_expert_overlay=show_expert_overlay,
     )
 
     fig.suptitle(
@@ -498,6 +583,10 @@ def main() -> None:
             label="A*",
             heuristic_mode="euclidean",
             heuristic_weight=1.0,
+            clearance_weight=float(args.classic_clearance_weight),
+            clearance_safe_distance=float(args.classic_clearance_safe_distance),
+            clearance_power=float(args.classic_clearance_power),
+            clearance_integration_mode=str(args.classic_clearance_integration_mode),
             diagonal_cost=args.diagonal_cost,
             allow_corner_cut=args.allow_corner_cut,
         )
@@ -506,6 +595,10 @@ def main() -> None:
             label="Improved A*",
             heuristic_mode="octile",
             heuristic_weight=1.0,
+            clearance_weight=float(args.classic_clearance_weight),
+            clearance_safe_distance=float(args.classic_clearance_safe_distance),
+            clearance_power=float(args.classic_clearance_power),
+            clearance_integration_mode=str(args.classic_clearance_integration_mode),
             diagonal_cost=args.diagonal_cost,
             allow_corner_cut=args.allow_corner_cut,
         )
@@ -517,6 +610,10 @@ def main() -> None:
             heuristic_residual_map=residual_map,
             residual_confidence_map=resolved_conf,
             residual_weight=float(args.residual_weight),
+            clearance_weight=float(args.v3_search_clearance_weight),
+            clearance_safe_distance=float(args.v3_search_clearance_safe_distance),
+            clearance_power=float(args.v3_search_clearance_power),
+            clearance_integration_mode=str(args.v3_search_clearance_integration_mode),
             diagonal_cost=args.diagonal_cost,
             allow_corner_cut=args.allow_corner_cut,
         )
@@ -536,6 +633,8 @@ def main() -> None:
             effective_map=effective_map,
             out_path=args.output_dir / f"reason_case_idx{idx:04d}.png",
             dpi=int(args.dpi),
+            show_expert_overlay=not bool(args.hide_expert_overlay),
+            show_expert_panel=not bool(args.hide_expert_panel),
         )
 
         top_res_mask = residual_map >= float(np.percentile(residual_map, 95))

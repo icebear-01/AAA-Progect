@@ -321,6 +321,8 @@ private:
 
     float safe_distance=0.2;//添加车辆碰撞安全距离
     float safe_distance_wall=0.15; //添加车辆碰撞安全距离
+    bool relax_qp_start_dl=false;
+    float qp_start_dl_slack=0.0;
     bool QpPathRunningNormally=true;
 
     Frenet_path_points QP_path_sl_global;

@@ -16,6 +16,7 @@ from matplotlib import font_manager
 from hybrid_astar_guided.grid_astar import Astar8ConnStats, astar_8conn_stats, path_length_8conn
 from neural_astar.api.guidance_infer import load_guidance_encoder
 from neural_astar.datasets import ParkingGuidanceDataset, PlanningNPZGuidanceDataset
+from neural_astar.utils.guidance_targets import build_clearance_input_map
 from neural_astar.utils.residual_confidence import resolve_residual_confidence_map
 from neural_astar.utils.residual_prediction import (
     apply_residual_scale_np,
@@ -66,6 +67,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--residual-confidence-kernel", type=int, default=5)
     parser.add_argument("--residual-confidence-strength", type=float, default=0.75)
     parser.add_argument("--residual-confidence-min", type=float, default=0.25)
+    parser.add_argument("--learned-search-clearance-weight", type=float, default=0.0)
+    parser.add_argument("--learned-search-clearance-safe-distance", type=float, default=0.0)
+    parser.add_argument("--learned-search-clearance-power", type=float, default=2.0)
+    parser.add_argument(
+        "--learned-search-clearance-integration-mode",
+        type=str,
+        default="g_cost",
+        choices=["g_cost", "heuristic_bias", "priority_tie_break"],
+    )
     parser.add_argument("--diagonal-cost", type=float, default=float(np.sqrt(2.0)))
     parser.add_argument("--allow-corner-cut", dest="allow_corner_cut", action="store_true")
     parser.add_argument("--no-allow-corner-cut", dest="allow_corner_cut", action="store_false")
@@ -74,6 +84,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
     )
+    parser.add_argument("--hide-expert-overlay", action="store_true")
     parser.add_argument("--dpi", type=int, default=400)
     parser.set_defaults(allow_corner_cut=True)
     return parser.parse_args()
@@ -93,6 +104,16 @@ def _infer_residual_map(
     occ = sample["occ_map"].unsqueeze(0).to(device)
     start = sample["start_map"].unsqueeze(0).to(device)
     goal = sample["goal_map"].unsqueeze(0).to(device)
+    extra_input_maps = None
+    if int(getattr(model, "extra_input_channels", 0)) > 0:
+        clearance_input = sample.get("clearance_input_map")
+        if clearance_input is None:
+            clearance_input_np = build_clearance_input_map(
+                occ_map=sample["occ_map"].numpy()[0].astype(np.float32),
+                clip_distance=float(getattr(model, "clearance_input_clip_distance", 0.0)),
+            )[None, ...].astype(np.float32)
+            clearance_input = torch.from_numpy(clearance_input_np)
+        extra_input_maps = clearance_input.unsqueeze(0).to(device)
     start_pose = sample.get("start_pose")
     goal_pose = sample.get("goal_pose")
     start_yaw = None
@@ -103,7 +124,14 @@ def _infer_residual_map(
         goal_yaw = goal_pose[2].view(1).to(device=device, dtype=occ.dtype)
 
     with torch.no_grad():
-        out = model(occ, start, goal, start_yaw=start_yaw, goal_yaw=goal_yaw)
+        out = model(
+            occ,
+            start,
+            goal,
+            start_yaw=start_yaw,
+            goal_yaw=goal_yaw,
+            extra_input_maps=extra_input_maps,
+        )
     pred = out.cost_map[0].detach().cpu().numpy().astype(np.float32)
     scale = None
     if out.scale_map is not None:
@@ -136,6 +164,12 @@ def _run_astar(
     heuristic_residual_map: np.ndarray | None = None,
     residual_confidence_map: np.ndarray | None = None,
     residual_weight: float = 0.0,
+    clearance_weight: float = 0.0,
+    clearance_safe_distance: float = 0.0,
+    clearance_power: float = 2.0,
+    clearance_integration_mode: str = "g_cost",
+    turn_weight: float = 0.0,
+    turn_integration_mode: str = "state_g_cost",
     diagonal_cost: float,
     allow_corner_cut: bool,
 ) -> PlannerStats:
@@ -148,6 +182,12 @@ def _run_astar(
         heuristic_residual_map=heuristic_residual_map,
         residual_confidence_map=residual_confidence_map,
         residual_weight=float(residual_weight),
+        clearance_weight=float(clearance_weight),
+        clearance_safe_distance=float(clearance_safe_distance),
+        clearance_power=float(clearance_power),
+        clearance_integration_mode=str(clearance_integration_mode),
+        turn_weight=float(turn_weight),
+        turn_integration_mode=str(turn_integration_mode),
         diagonal_cost=float(diagonal_cost),
         allow_corner_cut=bool(allow_corner_cut),
         lambda_guidance=0.0,
@@ -184,10 +224,12 @@ def _plot_panel(
     planner: PlannerStats,
     title: str,
     font_prop: font_manager.FontProperties,
+    show_expert_overlay: bool = True,
 ) -> None:
     height, width = occ.shape
     ax.imshow(1.0 - occ, cmap="gray", vmin=0.0, vmax=1.0, interpolation="nearest")
-    ax.imshow(opt_traj, cmap="Blues", alpha=0.16, vmin=0.0, vmax=1.0, interpolation="nearest")
+    if show_expert_overlay:
+        ax.imshow(opt_traj, cmap="Blues", alpha=0.16, vmin=0.0, vmax=1.0, interpolation="nearest")
     heat = _expanded_heatmap(planner.stats, height, width)
     if float(heat.max()) > 0.0:
         ax.imshow(heat, cmap="magma", alpha=0.58, vmin=0.0, vmax=1.0, interpolation="nearest")
@@ -271,6 +313,10 @@ def main() -> None:
         heuristic_residual_map=pred_residual,
         residual_confidence_map=learned_conf,
         residual_weight=float(args.residual_weight),
+        clearance_weight=float(args.learned_search_clearance_weight),
+        clearance_safe_distance=float(args.learned_search_clearance_safe_distance),
+        clearance_power=float(args.learned_search_clearance_power),
+        clearance_integration_mode=str(args.learned_search_clearance_integration_mode),
         diagonal_cost=args.diagonal_cost,
         allow_corner_cut=args.allow_corner_cut,
     )
@@ -286,7 +332,17 @@ def main() -> None:
 
     fig, axes = plt.subplots(1, 3, figsize=(17.5, 6.2))
     for ax, (label, planner) in zip(np.asarray(axes), planners):
-        _plot_panel(ax, occ, opt_traj, start_xy, goal_xy, planner, _panel_title(label, planner), font_prop)
+        _plot_panel(
+            ax,
+            occ,
+            opt_traj,
+            start_xy,
+            goal_xy,
+            planner,
+            _panel_title(label, planner),
+            font_prop,
+            show_expert_overlay=not bool(args.hide_expert_overlay),
+        )
 
     learned_delta = learned.stats.expanded_nodes - improved.stats.expanded_nodes
     fig.suptitle(

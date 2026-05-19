@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Sequence
 
 import numpy as np
 import torch
@@ -16,8 +17,9 @@ from rl_env import SLPathEnv
 
 from .buffer import RolloutBuffer, RunningNormalizer
 from .config import PPOConfig
-from .encoding import encode_observation
+from .encoding import encode_observation, encode_observation_batch
 from .model import ActorCritic
+from .vector_env import SubprocVectorEnv, SyncVectorEnv
 
 
 class PPOTrainer:
@@ -29,18 +31,24 @@ class PPOTrainer:
         self.primary_env = env
         self._env_spec = env.grid_spec
         self._base_env_kwargs = self._extract_env_kwargs(env)
+        self.num_envs = max(1, int(config.num_envs))
+        self._env_kwargs_list = self._build_env_kwargs_list(self.num_envs)
 
-        self.envs: List[SLPathEnv] = [env]
-        for idx in range(1, max(1, int(config.num_envs))):
-            clone_kwargs = dict(self._base_env_kwargs)
-            base_seed = clone_kwargs.pop("seed", None)
-            clone_seed = None if base_seed is None else int(base_seed) + idx
-            clone_kwargs["seed"] = clone_seed
-            clone_env = SLPathEnv(self._env_spec, **clone_kwargs)
-            self.envs.append(clone_env)
+        if config.vector_env_mode == "subproc" and self.num_envs > 1:
+            self.env_manager = SubprocVectorEnv(
+                self._env_spec,
+                self._env_kwargs_list,
+                start_method=config.vector_env_start_method,
+            )
+        else:
+            self.env_manager = SyncVectorEnv(env, self._env_spec, self._env_kwargs_list)
 
-        sample_obs = self.envs[0].reset()
-        feature_dim = encode_observation(sample_obs, self._env_spec).shape[0]
+        sample_obs = self.env_manager.reset()[0]
+        feature_dim = encode_observation(
+            sample_obs,
+            self._env_spec,
+            include_action_mask=config.include_action_mask_in_state,
+        ).shape[0]
         action_dim = self._env_spec.l_samples
 
         occupancy_shape = (self._env_spec.s_samples, self._env_spec.l_samples)
@@ -63,13 +71,27 @@ class PPOTrainer:
         self.buffer = RolloutBuffer()
         self.value_normalizer = RunningNormalizer() if config.normalize_value_targets else None
         self._last_value_buffer = torch.zeros(
-            len(self.envs), dtype=torch.float32, device=self.device
+            self.num_envs, dtype=torch.float32, device=self.device
         )
 
         Path(config.log_dir).mkdir(parents=True, exist_ok=True)
         self.writer = SummaryWriter(log_dir=config.log_dir)
         self.global_step = 0
         self.rollout_stats: Dict[str, float] = {}
+        self.eval_env_manager: SyncVectorEnv | SubprocVectorEnv | None = None
+        self.eval_scenario_indices: List[int] = []
+        self.eval_num_envs = 0
+        self._setup_evaluator()
+
+    def _build_env_kwargs_list(self, num_envs: int) -> List[Dict[str, object]]:
+        kwargs_list: List[Dict[str, object]] = []
+        for idx in range(max(1, int(num_envs))):
+            clone_kwargs = dict(self._base_env_kwargs)
+            base_seed = clone_kwargs.pop("seed", None)
+            clone_seed = None if base_seed is None else int(base_seed) + idx
+            clone_kwargs["seed"] = clone_seed
+            kwargs_list.append(clone_kwargs)
+        return kwargs_list
 
     def _extract_env_kwargs(self, env: SLPathEnv) -> Dict[str, object]:
         return {
@@ -109,6 +131,136 @@ class PPOTrainer:
             "seed": None,
         }
 
+    def _setup_evaluator(self) -> None:
+        if not self.config.eval_dataset_path:
+            return
+        dataset_path = Path(self.config.eval_dataset_path).expanduser().resolve()
+        payload = json.loads(dataset_path.read_text(encoding="utf-8"))
+        scenarios = payload.get("scenarios", [])
+        if not isinstance(scenarios, list) or not scenarios:
+            raise ValueError(f"Evaluation dataset is empty or malformed: {dataset_path}")
+
+        eval_count = min(max(1, int(self.config.eval_count)), len(scenarios))
+        if eval_count == len(scenarios):
+            indices = list(range(len(scenarios)))
+        else:
+            indices = np.linspace(0, len(scenarios) - 1, eval_count, dtype=int).tolist()
+        self.eval_scenario_indices = [
+            int(scenarios[idx].get("scenario_index", idx))
+            for idx in indices
+        ]
+
+        eval_env_kwargs = dict(self._base_env_kwargs)
+        eval_env_kwargs["scenario_dataset_path"] = str(dataset_path)
+        eval_env_kwargs["seed"] = None
+        self.eval_num_envs = min(
+            max(1, int(self.config.eval_num_envs)),
+            len(self.eval_scenario_indices),
+        )
+        eval_env_kwargs_list: List[Dict[str, object]] = []
+        for idx in range(self.eval_num_envs):
+            clone_kwargs = dict(eval_env_kwargs)
+            clone_kwargs["seed"] = idx
+            eval_env_kwargs_list.append(clone_kwargs)
+
+        if self.eval_num_envs > 1:
+            self.eval_env_manager = SubprocVectorEnv(
+                self._env_spec,
+                eval_env_kwargs_list,
+                start_method=self.config.vector_env_start_method,
+            )
+        else:
+            eval_primary_env = SLPathEnv(self._env_spec, **eval_env_kwargs_list[0])
+            self.eval_env_manager = SyncVectorEnv(
+                eval_primary_env,
+                self._env_spec,
+                eval_env_kwargs_list,
+            )
+
+    def _choose_eval_actions_batch(
+        self,
+        observations: Sequence[Dict[str, np.ndarray]],
+    ) -> List[int]:
+        if not observations:
+            return []
+        encoded = encode_observation_batch(
+            observations,
+            self._env_spec,
+            include_action_mask=self.config.include_action_mask_in_state,
+        )
+        state_batch = torch.from_numpy(encoded).to(self.device)
+        with torch.no_grad():
+            logits_batch, _ = self.actor_critic(state_batch)
+        if self.config.apply_action_mask:
+            raw_logits_batch = logits_batch
+            mask_batch = torch.from_numpy(
+                np.stack([obs["action_mask"].astype(bool) for obs in observations], axis=0)
+            ).to(self.device)
+            mask_any = mask_batch.any(dim=1, keepdim=True)
+            logits_batch = logits_batch.masked_fill(~mask_batch, -1e9)
+            logits_batch = torch.where(mask_any, logits_batch, raw_logits_batch)
+        return torch.argmax(logits_batch, dim=-1).detach().cpu().tolist()
+
+    def evaluate_success_rate(self) -> Dict[str, float]:
+        if self.eval_env_manager is None or not self.eval_scenario_indices:
+            return {}
+
+        was_training = self.actor_critic.training
+        self.actor_critic.eval()
+        success_count = 0
+        reasons: Dict[str, int] = {}
+        total = len(self.eval_scenario_indices)
+        step_budget = max(1, self._env_spec.s_samples + 2)
+
+        try:
+            for batch_start in range(0, total, self.eval_num_envs):
+                scenario_indices = self.eval_scenario_indices[
+                    batch_start : batch_start + self.eval_num_envs
+                ]
+                env_indices = list(range(len(scenario_indices)))
+                observations = self.eval_env_manager.reset_to_scenario_indices(
+                    scenario_indices,
+                    env_indices=env_indices,
+                )
+                active_env_indices = list(env_indices)
+                active_observations = list(observations)
+                step_counts = [0 for _ in env_indices]
+
+                while active_env_indices:
+                    actions = self._choose_eval_actions_batch(active_observations)
+                    results = self.eval_env_manager.step_indices(active_env_indices, actions)
+
+                    next_active_env_indices: List[int] = []
+                    next_active_observations: List[Dict[str, np.ndarray]] = []
+                    for env_idx, result in zip(active_env_indices, results):
+                        step_counts[env_idx] += 1
+                        reason = str(result.info.get("reason", "unknown"))
+                        done = bool(result.done) or step_counts[env_idx] >= step_budget
+                        if done:
+                            if not result.done and reason == "unknown":
+                                reason = "step_budget_exceeded"
+                            reasons[reason] = reasons.get(reason, 0) + 1
+                            if reason == "goal_reached":
+                                success_count += 1
+                            continue
+                        next_active_env_indices.append(env_idx)
+                        next_active_observations.append(result.observation)
+
+                    active_env_indices = next_active_env_indices
+                    active_observations = next_active_observations
+        finally:
+            if was_training:
+                self.actor_critic.train()
+
+        metrics: Dict[str, float] = {
+            "eval/success_rate": float(success_count / max(1, total)),
+            "eval/success_count": float(success_count),
+            "eval/eval_count": float(total),
+        }
+        for reason, count in reasons.items():
+            metrics[f"eval/reason_{reason}_rate"] = float(count / max(1, total))
+        return metrics
+
     def collect_rollout(self) -> List[float]:
         """采样固定步数的环境交互数据。"""
         self.buffer.clear()
@@ -121,7 +273,7 @@ class PPOTrainer:
         reset_time = 0.0
         resets = 0
 
-        num_envs = len(self.envs)
+        num_envs = self.num_envs
         observations: List[Dict[str, np.ndarray]] = []
         episode_returns_env = [0.0 for _ in range(num_envs)]
         all_episode_returns: List[float] = []
@@ -129,16 +281,16 @@ class PPOTrainer:
         self.actor_critic.eval()
 
         reset_start = time.perf_counter()
-        for env in self.envs:
-            observations.append(env.reset())
+        observations = self.env_manager.reset()
         reset_time += time.perf_counter() - reset_start
         resets += num_envs
 
         for _ in range(self.config.rollout_steps):
             encode_np_start = time.perf_counter()
-            state_np_batch = np.stack(
-                [encode_observation(obs, self._env_spec) for obs in observations],
-                axis=0,
+            state_np_batch = encode_observation_batch(
+                observations,
+                self._env_spec,
+                include_action_mask=self.config.include_action_mask_in_state,
             )
             mask_np_batch = np.stack(
                 [obs["action_mask"].astype(bool) for obs in observations],
@@ -156,10 +308,12 @@ class PPOTrainer:
                 logits_batch, value_batch = self.actor_critic(state_batch)
             policy_forward_time += time.perf_counter() - policy_forward_start
 
-            # 应用动作掩码，避免采样明显无效的动作。
-            mask_any = mask_batch.any(dim=1, keepdim=True)
-            masked_logits_batch = logits_batch.masked_fill(~mask_batch, -1e9)
-            masked_logits_batch = torch.where(mask_any, masked_logits_batch, logits_batch)
+            if self.config.apply_action_mask:
+                mask_any = mask_batch.any(dim=1, keepdim=True)
+                masked_logits_batch = logits_batch.masked_fill(~mask_batch, -1e9)
+                masked_logits_batch = torch.where(mask_any, masked_logits_batch, logits_batch)
+            else:
+                masked_logits_batch = logits_batch
 
             policy_sample_start = time.perf_counter()
             with torch.no_grad():
@@ -169,11 +323,12 @@ class PPOTrainer:
                 log_prob_batch = log_probs_batch.gather(-1, action_batch.unsqueeze(-1)).squeeze(-1)
             policy_sample_time += time.perf_counter() - policy_sample_start
 
-            for idx, env in enumerate(self.envs):
-                env_start = time.perf_counter()
-                result = env.step(int(action_batch[idx].item()))
-                env_time += time.perf_counter() - env_start
+            env_start = time.perf_counter()
+            results = self.env_manager.step(action_batch.detach().cpu().tolist())
+            env_time += time.perf_counter() - env_start
 
+            done_indices: List[int] = []
+            for idx, result in enumerate(results):
                 reward = torch.tensor(result.reward, dtype=torch.float32, device=self.device)
                 done = torch.tensor(result.done, dtype=torch.float32, device=self.device)
 
@@ -196,17 +351,23 @@ class PPOTrainer:
                 if result.done:
                     all_episode_returns.append(episode_returns_env[idx])
                     episode_returns_env[idx] = 0.0
-                    reset_start = time.perf_counter()
-                    observations[idx] = env.reset()
-                    reset_time += time.perf_counter() - reset_start
-                    resets += 1
+                    done_indices.append(idx)
+
+            if done_indices:
+                reset_start = time.perf_counter()
+                reset_observations = self.env_manager.reset_indices(done_indices)
+                reset_time += time.perf_counter() - reset_start
+                resets += len(done_indices)
+                for idx, observation in zip(done_indices, reset_observations):
+                    observations[idx] = observation
 
             self.global_step += num_envs
 
         encode_np_start = time.perf_counter()
-        bootstrap_np_batch = np.stack(
-            [encode_observation(obs, self._env_spec) for obs in observations],
-            axis=0,
+        bootstrap_np_batch = encode_observation_batch(
+            observations,
+            self._env_spec,
+            include_action_mask=self.config.include_action_mask_in_state,
         )
         encode_numpy_time += time.perf_counter() - encode_np_start
 
@@ -244,7 +405,7 @@ class PPOTrainer:
     def _compute_advantages(
         self, rewards: torch.Tensor, dones: torch.Tensor, values: torch.Tensor
     ) -> Dict[str, torch.Tensor]:
-        num_envs = len(self.envs)
+        num_envs = self.num_envs
         rollout_steps = self.config.rollout_steps
 
         rewards = rewards.reshape(rollout_steps, num_envs)
@@ -307,12 +468,15 @@ class PPOTrainer:
 
                 logits, values_pred = self.actor_critic(batch_states)
 
-                # 训练阶段同样施加动作掩码，保持分布一致。
-                mask_any = batch_action_masks.any(dim=1, keepdim=True)
-                masked_logits = logits.masked_fill(~batch_action_masks, -1e9)
-                masked_logits = torch.where(mask_any, masked_logits, logits)
-
-                masked_old_logits = batch_old_logits  # 已在 rollout 阶段遮罩
+                if self.config.apply_action_mask:
+                    # 训练阶段同样施加动作掩码，保持分布一致。
+                    mask_any = batch_action_masks.any(dim=1, keepdim=True)
+                    masked_logits = logits.masked_fill(~batch_action_masks, -1e9)
+                    masked_logits = torch.where(mask_any, masked_logits, logits)
+                    masked_old_logits = batch_old_logits  # 已在 rollout 阶段遮罩
+                else:
+                    masked_logits = logits
+                    masked_old_logits = batch_old_logits
 
                 dist = Categorical(logits=masked_logits)
                 new_log_probs = dist.log_prob(batch_actions)
@@ -424,6 +588,10 @@ class PPOTrainer:
     def close(self) -> None:
         self.writer.flush()
         self.writer.close()
+        self.env_manager.close()
+        if self.eval_env_manager is not None:
+            self.eval_env_manager.close()
+            self.eval_env_manager = None
 
     def load_value_normalizer_state(self, state: dict | None) -> None:
         if self.value_normalizer is not None and state:

@@ -65,6 +65,10 @@ add_executable(rl_dp_test rl_dp_test.cpp)
 target_link_libraries(rl_dp_test PRIVATE onnxruntime rl_dp)
 target_link_libraries(rl_dp_test PRIVATE /usr/local/onnxruntime/lib/libonnxruntime.so)
 
+add_executable(benchmark_rl_dp_runtime benchmark_rl_dp_runtime.cpp)
+target_link_libraries(benchmark_rl_dp_runtime PRIVATE onnxruntime rl_dp)
+target_link_libraries(benchmark_rl_dp_runtime PRIVATE /usr/local/onnxruntime/lib/libonnxruntime.so)
+
 if(USE_MATPLOTLIBCPP)
     set(MATPLOTLIBCPP_DIR "${PROJECT_SOURCE_DIR}/../third_party/matplotlib-cpp-master")
     if(NOT EXISTS "${MATPLOTLIBCPP_DIR}/matplotlibcpp.h")
@@ -95,6 +99,10 @@ if(USE_MATPLOTLIBCPP)
     target_link_libraries(rl_dp_test PRIVATE matplotlib_cpp)
     target_include_directories(rl_dp_test PRIVATE ${MATPLOTLIBCPP_DIR})
     target_compile_definitions(rl_dp_test PRIVATE USE_MATPLOTLIBCPP)
+
+    target_link_libraries(benchmark_rl_dp_runtime PRIVATE matplotlib_cpp)
+    target_include_directories(benchmark_rl_dp_runtime PRIVATE ${MATPLOTLIBCPP_DIR})
+    target_compile_definitions(benchmark_rl_dp_runtime PRIVATE USE_MATPLOTLIBCPP)
 endif()
 
 # 运行期如需 rpath，可启用以下两行：

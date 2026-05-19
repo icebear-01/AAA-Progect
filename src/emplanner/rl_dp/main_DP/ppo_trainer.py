@@ -46,6 +46,22 @@ def _apply_training_hparam_overrides(config_data: Dict[str, object], args: argpa
     else:
         config_data["num_envs"] = num_envs
 
+    if args.vector_env is not None:
+        config_data["vector_env_mode"] = str(args.vector_env)
+    else:
+        config_data.setdefault(
+            "vector_env_mode",
+            PPOConfig.__dataclass_fields__["vector_env_mode"].default,
+        )
+
+    if args.vector_env_start_method is not None:
+        config_data["vector_env_start_method"] = str(args.vector_env_start_method)
+    else:
+        config_data.setdefault(
+            "vector_env_start_method",
+            PPOConfig.__dataclass_fields__["vector_env_start_method"].default,
+        )
+
     if args.buffer_size is not None:
         total_steps = max(1, int(args.buffer_size))
         rollout_steps = max(1, total_steps // max(1, num_envs))
@@ -147,6 +163,17 @@ def train(
                     f"({checkpoint_duration:.2f}s)"
                 )
 
+            eval_duration = 0.0
+            eval_interval = config.eval_interval or 0
+            eval_metrics: Dict[str, float] = {}
+            if eval_interval > 0 and update % eval_interval == 0:
+                eval_start_time = time.perf_counter()
+                eval_metrics = trainer.evaluate_success_rate()
+                eval_duration = time.perf_counter() - eval_start_time
+                if eval_metrics:
+                    trainer.log(eval_metrics, update)
+                trainer.log({"timing/eval_seconds": eval_duration}, update)
+
             total_duration = time.perf_counter() - update_start_time
             trainer.log({"timing/update_total_seconds": total_duration}, update)
 
@@ -160,8 +187,15 @@ def train(
                     f"kl={metrics.get('kl_divergence', 0.0):.4f} | "
                     f"time rollout={rollout_duration:.2f}s update={update_duration:.2f}s "
                     f"log={log_duration:.2f}s checkpoint={checkpoint_duration:.2f}s "
+                    f"eval={eval_duration:.2f}s "
                     f"total={total_duration:.2f}s"
                 )
+                if eval_metrics:
+                    print(
+                        f"  Eval | success_rate={eval_metrics.get('eval/success_rate', 0.0):.4f} "
+                        f"success={int(eval_metrics.get('eval/success_count', 0.0))}/"
+                        f"{int(eval_metrics.get('eval/eval_count', 0.0))}"
+                    )
                 if stats:
                     print(
                         "  Rollout breakdown | "
@@ -206,6 +240,20 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=4,
         help="并行环境数量（默认 4）",
+    )
+    parser.add_argument(
+        "--vector-env",
+        type=str,
+        choices=("sync", "subproc"),
+        default=None,
+        help="环境采样模式：sync 或 subproc",
+    )
+    parser.add_argument(
+        "--vector-env-start-method",
+        type=str,
+        choices=("fork", "spawn", "forkserver"),
+        default=None,
+        help="多进程 vector env 的启动方式",
     )
     parser.add_argument("--num-epoch", type=int, default=None, help="每次 update 的 epoch 数")
     parser.add_argument("--batch-size", type=int, default=None, help="PPO 小批次大小")
@@ -276,6 +324,40 @@ def parse_args() -> argparse.Namespace:
         help="离线筛好的场景库 JSON；指定后训练直接从场景库采样",
     )
     parser.add_argument(
+        "--disable-mask-input",
+        action="store_true",
+        help="不将 action_mask 拼入网络输入，用于消融实验",
+    )
+    parser.add_argument(
+        "--disable-safety-mask",
+        action="store_true",
+        help="训练与采样阶段不对策略 logits 施加 action_mask，用于消融实验",
+    )
+    parser.add_argument(
+        "--eval-dataset",
+        type=str,
+        default=None,
+        help="固定验证场景集 JSON；指定后训练中定期评估成功率",
+    )
+    parser.add_argument(
+        "--eval-count",
+        type=int,
+        default=500,
+        help="训练中成功率评估使用的固定验证场景数量",
+    )
+    parser.add_argument(
+        "--eval-interval",
+        type=int,
+        default=None,
+        help="每 N 个 update 评估一次成功率",
+    )
+    parser.add_argument(
+        "--eval-num-envs",
+        type=int,
+        default=None,
+        help="成功率评估时使用的并行环境数",
+    )
+    parser.add_argument(
         "--log-dir",
         type=str,
         default=None,
@@ -343,6 +425,22 @@ def main() -> None:
         config_payload = dict(payload["config"])
         config_payload.setdefault("kl_coef", PPOConfig.__dataclass_fields__["kl_coef"].default)
         config_payload.setdefault("num_envs", PPOConfig.__dataclass_fields__["num_envs"].default)
+        config_payload.setdefault(
+            "include_action_mask_in_state",
+            PPOConfig.__dataclass_fields__["include_action_mask_in_state"].default,
+        )
+        config_payload.setdefault(
+            "apply_action_mask",
+            PPOConfig.__dataclass_fields__["apply_action_mask"].default,
+        )
+        config_payload.setdefault(
+            "vector_env_mode",
+            PPOConfig.__dataclass_fields__["vector_env_mode"].default,
+        )
+        config_payload.setdefault(
+            "vector_env_start_method",
+            PPOConfig.__dataclass_fields__["vector_env_start_method"].default,
+        )
         base_config = PPOConfig(**config_payload)
         config_data = asdict(base_config)
 
@@ -360,6 +458,18 @@ def main() -> None:
             config_data["entropy_coef"] = args.beta
         if args.kl_coef is not None:
             config_data["kl_coef"] = args.kl_coef
+        if args.disable_mask_input:
+            config_data["include_action_mask_in_state"] = False
+        if args.disable_safety_mask:
+            config_data["apply_action_mask"] = False
+        if args.eval_dataset is not None:
+            config_data["eval_dataset_path"] = args.eval_dataset
+        if args.eval_interval is not None:
+            config_data["eval_interval"] = max(1, int(args.eval_interval))
+        if args.eval_count is not None:
+            config_data["eval_count"] = max(1, int(args.eval_count))
+        if args.eval_num_envs is not None:
+            config_data["eval_num_envs"] = max(1, int(args.eval_num_envs))
         default_num_envs = PPOConfig.__dataclass_fields__["num_envs"].default
         if args.num_envs is not None:
             config_data["num_envs"] = max(1, int(args.num_envs))
@@ -429,8 +539,28 @@ def main() -> None:
             "device": device_name,
             "log_dir": log_dir,
             "checkpoint_path": checkpoint_path,
+            "include_action_mask_in_state": not args.disable_mask_input,
+            "apply_action_mask": not args.disable_safety_mask,
+            "eval_dataset_path": args.eval_dataset,
+            "eval_interval": max(1, int(args.eval_interval)) if args.eval_interval is not None else None,
+            "eval_count": max(1, int(args.eval_count)),
+            "eval_num_envs": (
+                max(1, int(args.eval_num_envs))
+                if args.eval_num_envs is not None
+                else PPOConfig.__dataclass_fields__["eval_num_envs"].default
+            ),
             "num_envs": (
                 max(1, int(args.num_envs)) if args.num_envs is not None else default_num_envs
+            ),
+            "vector_env_mode": (
+                str(args.vector_env)
+                if args.vector_env is not None
+                else PPOConfig.__dataclass_fields__["vector_env_mode"].default
+            ),
+            "vector_env_start_method": (
+                str(args.vector_env_start_method)
+                if args.vector_env_start_method is not None
+                else PPOConfig.__dataclass_fields__["vector_env_start_method"].default
             ),
         }
         if args.checkpoint_interval is not None:
@@ -460,7 +590,12 @@ def main() -> None:
         )
         return
 
-    print(f"Using entropy_coef={config.entropy_coef}, kl_coef={config.kl_coef}, num_envs={config.num_envs}")
+    print(
+        f"Using entropy_coef={config.entropy_coef}, kl_coef={config.kl_coef}, "
+        f"num_envs={config.num_envs}, vector_env={config.vector_env_mode}, "
+        f"mask_input={config.include_action_mask_in_state}, "
+        f"safety_mask={config.apply_action_mask}"
+    )
 
     train(
         env,

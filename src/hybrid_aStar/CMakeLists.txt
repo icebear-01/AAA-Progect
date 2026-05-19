@@ -50,6 +50,7 @@ find_package(
 )
 find_package(yaml-cpp REQUIRED)
 find_package(PkgConfig REQUIRED)
+find_package(Boost REQUIRED)
 pkg_check_modules(LIBZIP REQUIRED libzip)
 
 set(ONNXRUNTIME_DIR "/usr/local/onnxruntime")
@@ -59,11 +60,13 @@ set(ONNXRUNTIME_LIB_DIR "${ONNXRUNTIME_DIR}/lib")
 
 include_directories(
     include
+    env/cpp/include
     ${catkin_INCLUDE_DIRS}
     ${PROJECT_SOURCE_DIR}/../../../../devel/include
     ${PCL_INCLUDE_DIRS}
     ${ONNXRUNTIME_INCLUDE_DIR}
     ${LIBZIP_INCLUDE_DIRS}
+    ${Boost_INCLUDE_DIRS}
 )
 
 catkin_package(
@@ -92,6 +95,18 @@ target_link_libraries(
     ${GLOG_LIBRARIES}
     ${ONNXRUNTIME_LIB_DIR}/libonnxruntime.so
 )
+
+add_library(
+    HOPE_ENV_CORE STATIC
+    env/cpp/src/configs.cc
+    env/cpp/src/geometry.cc
+    env/cpp/src/random_utils.cc
+    env/cpp/src/vehicle.cc
+    env/cpp/src/parking_map_normal.cc
+    env/cpp/src/map_level.cc
+)
+target_include_directories(HOPE_ENV_CORE PUBLIC env/cpp/include ${Boost_INCLUDE_DIRS})
+set_target_properties(HOPE_ENV_CORE PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
 # add_dependencies(run_hybrid_astar ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS} planning_msgs_generate_messages_cpp) 
 add_executable(run_hybrid_astar app/run_hybrid_astar.cpp)
 # target_link_libraries(run_hybrid_astar PATH_SEARCHER_LIB ${PCL_LIBRARIES}  libosqp.so  
@@ -147,4 +162,18 @@ target_link_libraries(offline_guided_astar_cpp_demo
     glog
     yaml-cpp
     ${LIBZIP_LIBRARIES}
+)
+
+add_executable(hope_extrem_hybrid_astar_rviz app/hope_extrem_hybrid_astar_rviz.cpp)
+target_link_libraries(hope_extrem_hybrid_astar_rviz
+    PATH_SEARCHER_LIB
+    HOPE_ENV_CORE
+    ${catkin_LIBRARIES}
+    ${PCL_LIBRARIES}
+    libosqp.so
+    libOsqpEigen.so
+    libqdldl.so
+    gflags
+    glog
+    yaml-cpp
 )

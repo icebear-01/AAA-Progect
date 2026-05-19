@@ -11,9 +11,12 @@ masking should be applied externally (same as 训练/推理流程).
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
-from typing import Tuple
+from typing import Dict, Tuple
 
+import numpy as np
+import onnxruntime as ort
 import torch
 
 from ppo import ActorCritic, PPOConfig
@@ -74,6 +77,98 @@ def _load_policy(checkpoint_path: Path, device: torch.device) -> Tuple[ActorCrit
     return policy, feature_dim
 
 
+def _load_checkpoint_payload(checkpoint_path: Path, device: torch.device) -> Dict[str, object]:
+    payload = torch.load(checkpoint_path, map_location=device)
+    return payload
+
+
+def _export_metadata(
+    *,
+    checkpoint_path: Path,
+    output_path: Path,
+    metadata_path: Path,
+    payload: Dict[str, object],
+    feature_dim: int,
+) -> None:
+    config = PPOConfig(**payload["config"])
+    spec = GridSpec(**payload["grid_spec"])
+    state_dict = payload["model_state"]
+    grid_channels, extra_dim, hidden_dim, _ = _infer_model_dims(state_dict, spec, config)
+    metadata = {
+        "checkpoint": str(checkpoint_path),
+        "onnx_path": str(output_path),
+        "feature_dim": int(feature_dim),
+        "action_dim": int(spec.l_samples),
+        "hidden_dim": int(hidden_dim),
+        "grid_channels": int(grid_channels),
+        "extra_dim": int(extra_dim),
+        "occupancy_shape": [int(spec.s_samples), int(spec.l_samples)],
+        "grid_spec": {
+            "s_range": list(spec.s_range),
+            "l_range": list(spec.l_range),
+            "s_samples": int(spec.s_samples),
+            "l_samples": int(spec.l_samples),
+        },
+        "input_names": ["state"],
+        "output_names": ["logits", "value"],
+        "notes": {
+            "action_masking": "Apply action mask externally after reading logits.",
+            "state_encoding": "Input must match encode_observation() output layout used during training.",
+        },
+    }
+    metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+
+
+def _validate_export(
+    *,
+    policy: ActorCritic,
+    output_path: Path,
+    feature_dim: int,
+    device: torch.device,
+    num_samples: int,
+    atol: float,
+    rtol: float,
+) -> Dict[str, float]:
+    ort_session = ort.InferenceSession(
+        str(output_path),
+        providers=["CPUExecutionProvider"],
+    )
+    max_abs_logits = 0.0
+    max_abs_value = 0.0
+    rng = np.random.default_rng(20260409)
+
+    for _ in range(num_samples):
+        sample = rng.standard_normal((1, feature_dim), dtype=np.float32)
+        torch_input = torch.from_numpy(sample).to(device)
+        with torch.no_grad():
+            torch_logits, torch_value = policy(torch_input)
+        ort_logits, ort_value = ort_session.run(None, {"state": sample})
+
+        logits_diff = np.max(np.abs(torch_logits.detach().cpu().numpy() - ort_logits))
+        value_diff = np.max(
+            np.abs(
+                np.asarray(torch_value.detach().cpu().numpy())
+                - np.asarray(ort_value)
+            )
+        )
+        max_abs_logits = max(max_abs_logits, float(logits_diff))
+        max_abs_value = max(max_abs_value, float(value_diff))
+
+    logits_ok = max_abs_logits <= atol + rtol
+    value_ok = max_abs_value <= atol + rtol
+    if not logits_ok or not value_ok:
+        raise RuntimeError(
+            "ONNX validation failed: "
+            f"max_abs_logits={max_abs_logits:.6e}, max_abs_value={max_abs_value:.6e}, "
+            f"atol={atol:.6e}, rtol={rtol:.6e}"
+        )
+    return {
+        "max_abs_logits": max_abs_logits,
+        "max_abs_value": max_abs_value,
+        "samples": int(num_samples),
+    }
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Export PPO checkpoint to ONNX.")
     parser.add_argument(
@@ -89,6 +184,12 @@ def parse_args() -> argparse.Namespace:
         help="Output ONNX path (default: same name as checkpoint with .onnx).",
     )
     parser.add_argument(
+        "--metadata",
+        type=Path,
+        default=None,
+        help="Optional metadata JSON path (default: same name as ONNX with .json).",
+    )
+    parser.add_argument(
         "--opset",
         type=int,
         default=13,
@@ -99,6 +200,29 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         help="Export device cpu/cuda (default: cuda if available else cpu).",
+    )
+    parser.add_argument(
+        "--skip-validate",
+        action="store_true",
+        help="Skip ONNX Runtime output validation after export.",
+    )
+    parser.add_argument(
+        "--validate-samples",
+        type=int,
+        default=5,
+        help="Number of random samples used for ONNX/PyTorch consistency validation.",
+    )
+    parser.add_argument(
+        "--atol",
+        type=float,
+        default=1e-4,
+        help="Absolute tolerance for ONNX validation.",
+    )
+    parser.add_argument(
+        "--rtol",
+        type=float,
+        default=1e-4,
+        help="Relative tolerance for ONNX validation.",
     )
     return parser.parse_args()
 
@@ -114,8 +238,13 @@ def main() -> None:
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
     output_path = args.output or checkpoint_path.with_suffix(".onnx")
+    metadata_path = args.metadata or output_path.with_suffix(".json")
 
+    payload = _load_checkpoint_payload(checkpoint_path, device)
     policy, feature_dim = _load_policy(checkpoint_path, device)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
 
     dummy_input = torch.zeros(1, feature_dim, dtype=torch.float32, device=device)
     input_names = ["state"]
@@ -136,7 +265,36 @@ def main() -> None:
         opset_version=int(args.opset),
         do_constant_folding=True,
     )
-    print(f"Exported ONNX model to {output_path} (feature_dim={feature_dim}, device={device.type})")
+    _export_metadata(
+        checkpoint_path=checkpoint_path,
+        output_path=output_path,
+        metadata_path=metadata_path,
+        payload=payload,
+        feature_dim=feature_dim,
+    )
+
+    print(
+        f"Exported ONNX model to {output_path} "
+        f"(feature_dim={feature_dim}, device={device.type})"
+    )
+    print(f"Saved metadata to {metadata_path}")
+
+    if not args.skip_validate:
+        result = _validate_export(
+            policy=policy,
+            output_path=output_path,
+            feature_dim=feature_dim,
+            device=device,
+            num_samples=max(1, int(args.validate_samples)),
+            atol=float(args.atol),
+            rtol=float(args.rtol),
+        )
+        print(
+            "Validation passed | "
+            f"samples={result['samples']} | "
+            f"max_abs_logits={result['max_abs_logits']:.6e} | "
+            f"max_abs_value={result['max_abs_value']:.6e}"
+        )
 
 
 if __name__ == "__main__":

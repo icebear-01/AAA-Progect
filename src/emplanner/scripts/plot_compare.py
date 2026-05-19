@@ -13,7 +13,7 @@ try:
     import matplotlib.pyplot as plt
     from matplotlib import font_manager
     from matplotlib.lines import Line2D
-    from matplotlib.patches import Rectangle
+    from matplotlib.patches import Polygon, Rectangle
     from matplotlib.ticker import MultipleLocator
 except ImportError as exc:
     print(f"matplotlib import failed: {exc}", file=sys.stderr)
@@ -509,12 +509,12 @@ def apply_paper_style():
     plt.rcParams.update(
         {
             "font.family": font_family,
-            "font.size": 10,
-            "axes.labelsize": 11,
-            "axes.titlesize": 11,
-            "legend.fontsize": 9,
-            "xtick.labelsize": 9,
-            "ytick.labelsize": 9,
+            "font.size": 16,
+            "axes.labelsize": 18,
+            "axes.titlesize": 18,
+            "legend.fontsize": 16,
+            "xtick.labelsize": 18,
+            "ytick.labelsize": 18,
             "axes.linewidth": 0.9,
             "axes.unicode_minus": False,
             "grid.linewidth": 0.6,
@@ -554,10 +554,105 @@ def add_panel_label(ax, text):
     )
 
 
+def add_axis_end_labels(ax, xlabel, ylabel, fontproperties=None, fontsize=None):
+    ax.set_xlabel("")
+    ax.set_ylabel("")
+    ax.text(
+        1.01,
+        -0.02,
+        xlabel,
+        transform=ax.transAxes,
+        va="center",
+        ha="left",
+        fontproperties=fontproperties,
+        fontsize=fontsize,
+        clip_on=False,
+    )
+    ax.text(
+        -0.03,
+        1.01,
+        ylabel,
+        transform=ax.transAxes,
+        va="bottom",
+        ha="center",
+        fontproperties=fontproperties,
+        fontsize=fontsize,
+        clip_on=False,
+    )
+
+
 def style_axes(ax):
     ax.grid(True)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
+    ax.tick_params(axis="both", labelsize=18)
+
+
+def infer_start_yaw(path):
+    xs = path.get("x", [])
+    ys = path.get("y", [])
+    if len(xs) < 2:
+        return 0.0
+    for index in range(1, len(xs)):
+        dx = xs[index] - xs[index - 1]
+        dy = ys[index] - ys[index - 1]
+        if abs(dx) > 1e-9 or abs(dy) > 1e-9:
+            return math.atan2(dy, dx)
+    return 0.0
+
+
+def add_vehicle_patch(
+    ax,
+    center_x,
+    center_y,
+    yaw,
+    length,
+    width,
+    facecolor="#ffffff",
+    edgecolor="#111111",
+    linewidth=1.1,
+    alpha=0.95,
+    zorder=5.0,
+):
+    half_l = 0.5 * length
+    half_w = 0.5 * width
+    cos_yaw = math.cos(yaw)
+    sin_yaw = math.sin(yaw)
+    local_corners = [
+        (half_l, half_w),
+        (half_l, -half_w),
+        (-half_l, -half_w),
+        (-half_l, half_w),
+    ]
+    corners = []
+    for local_x, local_y in local_corners:
+        world_x = center_x + local_x * cos_yaw - local_y * sin_yaw
+        world_y = center_y + local_x * sin_yaw + local_y * cos_yaw
+        corners.append((world_x, world_y))
+    ax.add_patch(
+        Polygon(
+            corners,
+            closed=True,
+            facecolor=facecolor,
+            edgecolor=edgecolor,
+            linewidth=linewidth,
+            alpha=alpha,
+            zorder=zorder,
+            joinstyle="round",
+        )
+    )
+    nose_x = center_x + half_l * cos_yaw
+    nose_y = center_y + half_l * sin_yaw
+    tail_x = center_x - 0.18 * length * cos_yaw
+    tail_y = center_y - 0.18 * length * sin_yaw
+    ax.plot(
+        [tail_x, nose_x],
+        [tail_y, nose_y],
+        color=edgecolor,
+        linewidth=max(1.0, linewidth),
+        zorder=zorder + 0.1,
+        solid_capstyle="round",
+    )
 
 
 def find_available_scenarios(input_dir):
@@ -603,8 +698,15 @@ def main():
     parser.add_argument("--hide-grid", dest="show_grid", action="store_false", help="Hide DP lattice points on the path subplot")
     parser.add_argument("--right-panel", choices=["curvature", "st"], default="curvature", help="Right subplot content")
     parser.add_argument("--path-x-min", type=float, default=0.0, help="Path subplot x-axis minimum")
-    parser.add_argument("--path-x-max", type=float, default=9.0, help="Path subplot x-axis maximum")
+    parser.add_argument("--path-x-max", type=float, default=10.0, help="Path subplot x-axis maximum")
     parser.add_argument("--path-y-abs-max", type=float, default=3.5, help="Absolute y-axis limit for the path subplot")
+    parser.add_argument("--start-vehicle-length", type=float, default=0.0, help="Draw a vehicle box at the path start with the given length")
+    parser.add_argument("--start-vehicle-width", type=float, default=0.0, help="Draw a vehicle box at the path start with the given width")
+    parser.add_argument("--path-axis-labels-at-ends", action="store_true", help="Place x/y labels at the ends of the path axes")
+    parser.add_argument("--hide-path-axis-labels", action="store_true", help="Hide x/y labels on the path axes")
+    parser.add_argument("--path-tick-labelsize", type=float, default=None, help="Override tick label size on the path subplot")
+    parser.add_argument("--path-x-tick-step", type=int, default=1, help="Display every Nth x tick on the path subplot")
+    parser.add_argument("--path-axis-end-labelsize", type=float, default=None, help="Override x/y axis end label size on the path subplot")
     parser.set_defaults(show_grid=True)
     args = parser.parse_args()
 
@@ -660,7 +762,7 @@ def main():
     text_font = build_text_font_properties()
 
     dp_source = summary.get("dp_source", "classic")
-    dp_label = "RL-DP路径" if dp_source == "RL_DP" else "决策路径"  
+    dp_label = "决策路径"
     dp_curvature_label = "决策路径曲率" if dp_source == "RL_DP" else "决策路径曲率"
     qp_label = "优化路径"
     qp_curvature_label = "优化后曲率"   
@@ -672,8 +774,8 @@ def main():
         reference_label = None
         intrusion_label = "侵入参考线"
 
-    fig_width = 7.2 if args.paper else 14.0
-    fig_height = 3.2 if args.paper else 6.0
+    fig_width = 8.6 if args.paper else 14.0
+    fig_height = 3.9 if args.paper else 6.0
     fig, axes = plt.subplots(1, 2, figsize=(fig_width, fig_height), constrained_layout=args.paper)
 
     ax_path = axes[0]
@@ -775,13 +877,44 @@ def main():
                 },
                 zorder=2,
             )
-    ax_path.set_xlabel("x [m]", fontproperties=text_font)
-    ax_path.set_ylabel("y [m]", fontproperties=text_font)
+    if args.start_vehicle_length > 1e-6 and args.start_vehicle_width > 1e-6 and qp["x"] and qp["y"]:
+        start_yaw = infer_start_yaw(qp)
+        add_vehicle_patch(
+            ax_path,
+            center_x=qp["x"][0],
+            center_y=qp["y"][0],
+            yaw=start_yaw,
+            length=args.start_vehicle_length,
+            width=args.start_vehicle_width,
+            facecolor="#f8f9fa",
+            edgecolor="#202124",
+            linewidth=1.2 if args.paper else 1.4,
+            alpha=0.95,
+            zorder=4.8,
+        )
+    if args.hide_path_axis_labels:
+        ax_path.set_xlabel("")
+        ax_path.set_ylabel("")
+    elif args.path_axis_labels_at_ends:
+        add_axis_end_labels(
+            ax_path,
+            "x [m]",
+            "y [m]",
+            fontproperties=text_font,
+            fontsize=args.path_axis_end_labelsize,
+        )
+    else:
+        ax_path.set_xlabel("x [m]", fontproperties=text_font)
+        ax_path.set_ylabel("y [m]", fontproperties=text_font)
     ax_path.set_xlim(args.path_x_min, args.path_x_max)
+    x_tick_step = max(1, int(args.path_x_tick_step))
+    ax_path.set_xticks(list(range(int(math.floor(args.path_x_min)), int(math.ceil(args.path_x_max)) + 1, x_tick_step)))
     ax_path.set_ylim(-args.path_y_abs_max, args.path_y_abs_max)
     ax_path.set_aspect("equal", adjustable="box")
     ax_path.autoscale(enable=False)
     style_axes(ax_path)
+    if args.path_tick_labelsize is not None and args.path_tick_labelsize > 0.0:
+        ax_path.tick_params(axis="both", labelsize=args.path_tick_labelsize)
     path_legend_kwargs = {"frameon": True, "framealpha": 0.92}
     if args.paper:
         path_legend_kwargs.update(
@@ -905,12 +1038,14 @@ def main():
             tick.set_rotation(45)
             tick.set_ha("right")
         if args.paper:
-            ax_kappa.tick_params(axis="x", labelsize=8)
+            ax_kappa.tick_params(axis="x", labelsize=15)
     else:
         ax_kappa.plot(dp["s"], dp["kappa"], label=dp_curvature_label, linewidth=2.0, color="#1f5aa6")
         ax_kappa.plot(qp["s"], qp["kappa"], label=qp_curvature_label, linewidth=2.0, color="#d04a02")
         ax_kappa.set_xlabel("s [m]", fontproperties=text_font)
         ax_kappa.set_ylabel("kappa [1/m]", fontproperties=text_font)
+        ax_kappa.set_xlim(args.path_x_min, args.path_x_max)
+        ax_kappa.set_xticks(list(range(int(math.floor(args.path_x_min)), int(math.ceil(args.path_x_max)) + 1)))
     style_axes(ax_kappa)
     kappa_legend_kwargs = {"frameon": True, "framealpha": 0.92}
     if args.paper:
